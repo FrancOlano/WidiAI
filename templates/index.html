@@ -149,88 +149,6 @@
             display: inline-block;
             vertical-align: middle;
         }
-
-        .recording-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 20px;
-            min-height: 150px;
-            justify-content: center;
-        }
-
-        .record-button {
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            background-color: #000000;
-            border: none;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0;
-            position: relative;
-        }
-
-        .record-button:hover {
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.7);
-            transform: scale(1.05);
-        }
-
-        .record-button:active {
-            transform: scale(0.98);
-        }
-
-        .record-button-dot {
-            width: 60px;
-            height: 60px;
-            background-color: #ef5350;
-            border-radius: 50%;
-            transition: all 0.3s ease;
-        }
-
-        .record-button.recording .record-button-dot {
-            animation: pulse 1.5s infinite;
-        }
-
-        @keyframes pulse {
-            0% {
-                box-shadow: 0 0 0 0 rgba(239, 83, 80, 0.7);
-            }
-            50% {
-                box-shadow: 0 0 0 15px rgba(239, 83, 80, 0);
-            }
-            100% {
-                box-shadow: 0 0 0 0 rgba(239, 83, 80, 0);
-            }
-        }
-
-        #waveformCanvas {
-            width: 120px;
-            height: 120px;
-            border-radius: 8px;
-            background-color: #1a1a1a;
-            display: none;
-            cursor: pointer;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
-            transition: all 0.3s ease;
-        }
-
-        #waveformCanvas.show {
-            display: block;
-        }
-
-        #waveformCanvas:hover {
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.7);
-            transform: scale(1.05);
-        }
-
-        #waveformCanvas:active {
-            transform: scale(0.98);
-        }
     </style>
 </head>
 <body>
@@ -259,10 +177,22 @@
                 <div id="recordingMessage" class="message"></div>
             </div>
         </div>
+
+        <div class="midi-controls">
+            <button id="playBtn" type="button" aria-label="Play" title="Play">&#9654;</button>
+            <button id="pauseBtn" type="button" aria-label="Pause" title="Pause">&#10074;&#10074;</button>
+            <button id="stopBtn" type="button" aria-label="Stop" title="Stop">&#9632;</button>
+        </div>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.7.77/build/Tone.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
 
     <script>
         const fetchBtn = document.getElementById('fetchBtn');
+        const playBtn = document.getElementById('playBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const responseDiv = document.getElementById('response');
         const messageDiv = document.getElementById('message');
         const recordBtn = document.getElementById('recordBtn');
@@ -271,15 +201,6 @@
         const recordingStatusDiv = document.getElementById('recordingStatus');
         const recordingMessageDiv = document.getElementById('recordingMessage');
         const API_URL = 'http://localhost:8000';
-
-        // Audio visualization variables
-        let audioContext = null;
-        let analyser = null;
-        let mediaStream = null;
-        let isRecording = false;
-        let animationId = null;
-        let waveformHistory = [];
-        const MAX_HISTORY = 60;
 
         /**
          * Fetches the hello world message from the FastAPI backend
@@ -505,8 +426,6 @@
 
         // Add event listeners
         fetchBtn.addEventListener('click', fetchHelloWorld);
-        recordBtn.addEventListener('click', toggleRecording);
-        canvas.addEventListener('click', toggleRecording);
     </script>
 </body>
 </html>
