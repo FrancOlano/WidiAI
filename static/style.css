@@ -257,3 +257,43 @@ button:disabled {
 #waveformCanvas:active {
     transform: scale(0.98);
 }
+
+/* Upload Button Styles */
+.upload-container {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    min-height: 60px;
+    align-items: center;
+}
+
+.upload-button {
+    background-color: #42a5f5;
+    color: white;
+    border: none;
+    padding: 15px 30px;
+    font-size: 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.upload-button:hover:not(:disabled) {
+    background-color: #1e88e5;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(30, 136, 229, 0.4);
+}
+
+.upload-button:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.upload-button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
