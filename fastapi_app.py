@@ -3,21 +3,31 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import shutil
+import pyaudio
+import wave
 import threading
 import uuid
 import wave
 from datetime import datetime
 from pathlib import Path
 
-import pyaudio
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
 
 from custom_transcriber import transcribe_with_own_model
 
+
 app = FastAPI()
+
+# Setup static files and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # Enable CORS for frontend requests
 app.add_middleware(
@@ -78,8 +88,17 @@ def record_audio():
         print(f"Recording error: {e}")
 
 @app.get("/")
-def hello():
-    return JSONResponse({"message": "Hello World"})
+async def index(request: Request):
+    # Mock transcription models for the dropdown
+    transcription_models = [
+        {"value": "openai", "label": "OpenAI Whisper"},
+        {"value": "local", "label": "Local Model"},
+    ]
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "transcription_models": transcription_models,
+        "default_transcription_model": "openai"
+    })
 
 @app.post("/start-recording")
 def start_recording():
@@ -148,7 +167,7 @@ def stop_recording():
             status_code=500,
         )
 
-
+      
 def cleanup_files(paths: list[str]):
     """Delete temporary files after sending response."""
     for path in paths:
@@ -285,6 +304,41 @@ async def transcribe_audio(
             detail=str(e),
         )
 
+
+@app.post("/upload-audio")
+async def upload_audio(file: UploadFile = File(...)):
+    """Upload an audio file"""
+    try:
+        # Validate file type
+        allowed_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        
+        if file_ext not in allowed_extensions:
+            return JSONResponse(
+                {"status": "error", "message": f"File type not supported. Allowed: {', '.join(allowed_extensions)}"},
+                status_code=400,
+            )
+        
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{RECORDINGS_DIR}/uploaded_{timestamp}{file_ext}"
+        
+        # Save uploaded file
+        with open(filename, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        return JSONResponse(
+            {
+                "status": "success",
+                "message": "Audio file uploaded successfully",
+                "filename": filename,
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
 
 if __name__ == "__main__":
     import uvicorn

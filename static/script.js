@@ -403,3 +403,64 @@ convertBtn.addEventListener('click', transcribeAudio);
 playBtn.addEventListener('click', playMidi);
 pauseBtn.addEventListener('click', pauseMidiPlayback);
 stopBtn.addEventListener('click', stopMidiPlayback);
+// Audio Upload Functionality
+const uploadBtn = document.getElementById('uploadBtn');
+const audioFileInput = document.getElementById('audioFileInput');
+const uploadStatusDiv = document.getElementById('uploadStatus');
+const uploadMessageDiv = document.getElementById('uploadMessage');
+
+/**
+ * Handle audio file upload
+ */
+async function uploadAudioFile(file) {
+    try {
+        uploadBtn.disabled = true;
+        uploadStatusDiv.classList.remove('error', 'success');
+        uploadStatusDiv.classList.add('show');
+        uploadMessageDiv.textContent = 'Uploading file...';
+
+        // Create FormData and append the file
+        const formData = new FormData();
+        formData.append('file', file);
+
+        // Send to backend
+        const response = await fetch(`${API_URL}/upload-audio`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.message || 'Failed to upload audio file');
+        }
+
+        uploadStatusDiv.classList.add('success');
+        uploadMessageDiv.textContent = `✓ File uploaded successfully: ${data.filename}`;
+        uploadBtn.disabled = false;
+        audioFileInput.value = ''; // Reset file input
+
+    } catch (error) {
+        console.error('Upload error:', error);
+        uploadStatusDiv.classList.add('error');
+        uploadMessageDiv.textContent = `✗ Upload failed: ${error.message}`;
+        uploadBtn.disabled = false;
+    }
+}
+
+/**
+ * Handle file input change
+ */
+audioFileInput.addEventListener('change', (event) => {
+    const file = event.target.files[0];
+    if (file) {
+        uploadAudioFile(file);
+    }
+});
+
+/**
+ * Handle upload button click
+ */
+uploadBtn.addEventListener('click', () => {
+    audioFileInput.click();
+});

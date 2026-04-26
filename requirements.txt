@@ -2,9 +2,7 @@ Flask==3.0.0
 FastAPI==0.104.1
 uvicorn==0.24.0
 pyaudio==0.2.13
-
-fastapi
-python-multipart
+python-multipart==0.0.6
 torch
 librosa
 numpy
