@@ -109,6 +109,18 @@
             display: inline-block;
             vertical-align: middle;
         }
+
+        .midi-controls {
+            margin-top: 24px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .midi-controls button {
+            min-width: 90px;
+        }
+
     </style>
 </head>
 <body>
@@ -118,13 +130,91 @@
         <div id="response" class="response">
             <div id="message" class="message"></div>
         </div>
+
+        <div class="midi-controls">
+            <button id="playBtn" type="button" aria-label="Play" title="Play">&#9654;</button>
+            <button id="pauseBtn" type="button" aria-label="Pause" title="Pause">&#10074;&#10074;</button>
+            <button id="stopBtn" type="button" aria-label="Stop" title="Stop">&#9632;</button>
+        </div>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tone@14.7.77/build/Tone.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
 
     <script>
         const fetchBtn = document.getElementById('fetchBtn');
+        const playBtn = document.getElementById('playBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const responseDiv = document.getElementById('response');
         const messageDiv = document.getElementById('message');
         const API_URL = 'http://localhost:8000';
+        const MIDI_URL = '/static/converted.mid';
+
+        let midiData = null;
+        let synths = [];
+
+        function clearSynths() {
+            synths.forEach((synth) => synth.dispose());
+            synths = [];
+        }
+
+        async function loadMidiForPlayback() {
+            if (midiData) {
+                return;
+            }
+
+            const response = await fetch(MIDI_URL);
+            if (!response.ok) {
+                throw new Error(`Could not load MIDI file at ${MIDI_URL}`);
+            }
+
+            const midiBuffer = await response.arrayBuffer();
+            midiData = new Midi(midiBuffer);
+
+            Tone.Transport.stop();
+            Tone.Transport.cancel();
+            Tone.Transport.position = 0;
+            clearSynths();
+
+            const bpm = midiData.header.tempos[0]?.bpm || 120;
+            Tone.Transport.bpm.value = bpm;
+
+            midiData.tracks.forEach((track) => {
+                const synth = new Tone.PolySynth(Tone.Synth).toDestination();
+                synths.push(synth);
+
+                track.notes.forEach((note) => {
+                    Tone.Transport.schedule((time) => {
+                        synth.triggerAttackRelease(
+                            note.name,
+                            note.duration,
+                            time,
+                            note.velocity
+                        );
+                    }, note.time);
+                });
+            });
+        }
+
+        async function playMidi() {
+            try {
+                await Tone.start();
+                await loadMidiForPlayback();
+                Tone.Transport.start();
+            } catch (error) {
+                console.error('MIDI play error:', error);
+            }
+        }
+
+        function pauseMidi() {
+            Tone.Transport.pause();
+        }
+
+        function stopMidi() {
+            Tone.Transport.stop();
+            Tone.Transport.position = 0;
+        }
 
         /**
          * Fetches the hello world message from the FastAPI backend
@@ -170,6 +260,9 @@
 
         // Add event listener to button
         fetchBtn.addEventListener('click', fetchHelloWorld);
+        playBtn.addEventListener('click', playMidi);
+        pauseBtn.addEventListener('click', pauseMidi);
+        stopBtn.addEventListener('click', stopMidi);
     </script>
 </body>
 </html>
