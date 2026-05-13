@@ -5,21 +5,29 @@ It provides a browser-based workflow with a FastAPI backend and two transcriptio
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [Architecture](#architecture)
-- [Repository Structure](#repository-structure)
-- [Tech Stack](#tech-stack)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Model Setup](#model-setup)
-- [API Reference](#api-reference)
-- [Development Workflow](#development-workflow)
-- [Current Limitations](#current-limitations)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+- [WidiAI](#widiai)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Key Features](#key-features)
+  - [Architecture](#architecture)
+  - [Repository Structure](#repository-structure)
+  - [Tech Stack](#tech-stack)
+  - [Requirements](#requirements)
+  - [Quick Start](#quick-start)
+    - [1. Create and activate virtual environment](#1-create-and-activate-virtual-environment)
+    - [2. Install dependencies](#2-install-dependencies)
+    - [3. Run the app](#3-run-the-app)
+    - [4. Open in browser](#4-open-in-browser)
+  - [Configuration](#configuration)
+  - [Model Setup](#model-setup)
+    - [Option A: `transkun` (default)](#option-a-transkun-default)
+    - [Option B: `onsets_and_frames` (custom model)](#option-b-onsets_and_frames-custom-model)
+  - [API Reference](#api-reference)
+  - [Development Workflow](#development-workflow)
+  - [Current Limitations](#current-limitations)
+  - [Roadmap](#roadmap)
+  - [Contributing](#contributing)
+  - [License](#license)
 
 ## Overview
 
@@ -34,7 +42,7 @@ The implementation is aligned with the project SRS document (`Software Requireme
 
 ## Key Features
 
-- Single-page web interface served by FastAPI (`GET /`).
+- Single-page web interface hosted separately from the API.
 - Audio upload and server-side transcription.
 - Two model options:
   - `transkun` (default).
@@ -45,8 +53,8 @@ The implementation is aligned with the project SRS document (`Software Requireme
 
 ## Architecture
 
-- Frontend: Vanilla HTML/CSS/JS (`frontend/templates`, `frontend/static`).
-- Backend: FastAPI application in `backend/main.py`.
+- Frontend: Vanilla HTML/CSS/JS (`frontend/templates`, `frontend/static`) served by a separate static host or dev server.
+- Backend: FastAPI application in `backend/main.py` (API-only, no static file serving).
 - Transcription engines:
   - `transkun` via CLI or Python module execution.
   - Custom PyTorch pipeline in `backend/custom_transcriber.py`.
@@ -127,8 +135,8 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ### 4. Open in browser
 
-- App: `http://localhost:8000`
 - API docs: `http://localhost:8000/docs`
+- Serve the frontend separately and point it at the API base URL.
 
 ## Configuration
 
@@ -161,7 +169,6 @@ export OWN_MODEL_CHECKPOINT=/absolute/path/to/checkpoint_50000.pt
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/` | `GET` | Serves the frontend SPA |
 | `/upload-audio` | `POST` | Stores uploaded audio under `recordings/` and returns JSON status |
 | `/transcribe` | `POST` | Receives `audio` + `model` and returns generated `.mid` |
 
@@ -186,6 +193,13 @@ curl -X POST "http://localhost:8000/transcribe" \
   -F "model=transkun" \
   --output transcription_transkun.mid
 ```
+
+Frontend API base URL behavior (current code):
+
+- If the frontend is hosted on the same origin as the API, it uses `window.location.origin`.
+- Otherwise it falls back to `http://localhost:8000`.
+
+When hosting the frontend separately, ensure its API base URL points to the backend address.
 
 ## Development Workflow
 

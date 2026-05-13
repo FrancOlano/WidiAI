@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import shutil
 import uuid
 from datetime import datetime
@@ -11,17 +10,11 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from backend.custom_transcriber import transcribe_with_own_model
 
-import shutil
-
 app = FastAPI()
-
-# Setup static files
-app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
 # Enable CORS for frontend requests
 app.add_middleware(
@@ -44,10 +37,6 @@ MIDI_DIR.mkdir(exist_ok=True)
 # Create recordings directory if it doesn't exist
 if not os.path.exists(RECORDINGS_DIR):
     os.makedirs(RECORDINGS_DIR)
-
-@app.get("/")
-async def index():
-    return FileResponse("frontend/templates/index.html")
 
 def cleanup_files(paths: list[str]):
     """Delete temporary files after sending response."""
