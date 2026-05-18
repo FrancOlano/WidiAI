@@ -93,19 +93,165 @@ const HISTORY = [
 // APP STATE
 // ═══════════════════════════════════════════════════════════════════
 
+const STORAGE_KEYS = {
+  selectedModel: 'widi.selectedModel',
+  lastAudioId: 'widi.lastAudioId',
+  apiUrl: 'widi.apiUrl',
+};
+
+const AUDIO_DB = {
+  name: 'widi_audio_storage',
+  version: 1,
+  store: 'audio',
+};
+
+const MODEL_IDS = ['transkun', 'onsets_and_frames'];
+const MAX_RECORDING_MS = 5 * 60 * 1000;
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
+const getConfiguredApiUrl = () => {
+  const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
+    ? window.__WIDI_ENV__.API_URL.trim()
+    : '';
+  const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
+  const base = fromStorage || fromEnv || window.location.origin;
+  return base.replace(/\/+$/, '');
+};
+
+const getStoredModel = () => {
+  const stored = localStorage.getItem(STORAGE_KEYS.selectedModel);
+  if (stored === 'onsets' || stored === 'own') return 'onsets_and_frames';
+  return MODEL_IDS.includes(stored) ? stored : null;
+};
+
+const persistSelectedModel = (model) => {
+  if (MODEL_IDS.includes(model)) {
+    localStorage.setItem(STORAGE_KEYS.selectedModel, model);
+    window.selectedModel = model;
+  }
+};
+
+
+const openAudioDb = () => new Promise((resolve, reject) => {
+  if (!('indexedDB' in window)) {
+    reject(new Error('IndexedDB is not available in this browser.'));
+    return;
+  }
+
+  const request = indexedDB.open(AUDIO_DB.name, AUDIO_DB.version);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    if (!db.objectStoreNames.contains(AUDIO_DB.store)) {
+      const store = db.createObjectStore(AUDIO_DB.store, { keyPath: 'id' });
+      store.createIndex('createdAt', 'createdAt');
+    }
+  };
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+const saveAudioEntry = async ({ blob, name, source, durationMs }) => {
+  const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `audio_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const entry = {
+    id,
+    name,
+    source,
+    size: blob.size,
+    type: blob.type || 'audio/wav',
+    durationMs: durationMs || null,
+    createdAt: new Date().toISOString(),
+    blob,
+  };
+
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.store, 'readwrite');
+    tx.oncomplete = () => {
+      db.close();
+      resolve(entry);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.objectStore(AUDIO_DB.store).put(entry);
+  });
+};
+
+const loadAudioEntry = async (id) => {
+  if (!id) return null;
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.store, 'readonly');
+    const req = tx.objectStore(AUDIO_DB.store).get(id);
+    req.onsuccess = () => {
+      db.close();
+      resolve(req.result || null);
+    };
+    req.onerror = () => {
+      db.close();
+      reject(req.error);
+    };
+  });
+};
+
+const applyAudioEntryToState = (entry) => {
+  if (!entry || !entry.blob) return;
+  if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
+  _audioUrlRef = URL.createObjectURL(entry.blob);
+  state.audioUrl = _audioUrlRef;
+  state.audioFile = new File([entry.blob], entry.name, { type: entry.type || entry.blob.type || 'audio/wav' });
+  state.fileName = entry.name;
+  state.audioEntryId = entry.id;
+  state.stage = 'loaded';
+};
+
+const hydrateStoredAudio = async (content) => {
+  const lastId = localStorage.getItem(STORAGE_KEYS.lastAudioId);
+  if (!lastId) return;
+  try {
+    const entry = await loadAudioEntry(lastId);
+    if (entry) {
+      applyAudioEntryToState(entry);
+      renderDashboard(content);
+    }
+  } catch (error) {
+    console.warn('Failed to load stored audio:', error);
+  }
+};
+
+const resolveAudioForTranscription = async () => {
+  if (state.audioFile) return state.audioFile;
+  if (!state.audioEntryId) return null;
+  try {
+    const entry = await loadAudioEntry(state.audioEntryId);
+    if (!entry || !entry.blob) return null;
+    const file = new File([entry.blob], entry.name, { type: entry.type || entry.blob.type || 'audio/wav' });
+    state.audioFile = file;
+    state.fileName = entry.name;
+    return file;
+  } catch (error) {
+    console.warn('Failed to resolve stored audio:', error);
+    return null;
+  }
+};
+
+const storedModel = getStoredModel();
+
 const state = {
   page: 'dashboard',
-  apiUrl: window.location.origin,
+  apiUrl: getConfiguredApiUrl(),
   // Dashboard
   stage: 'idle',   // idle | loaded | processing | ready
   isRecording: false,
-  selectedModel: 'transkun',
+  selectedModel: storedModel || 'transkun',
   progress: 0,
   midiPlaying: false,
   midiTime: 0,
   fileName: null,
   audioUrl: null,
   audioFile: null,
+  audioEntryId: null,
   midiBlob: null,
   midiUrl: null,
   midiNotes: [],
@@ -129,7 +275,7 @@ const state = {
 
 // Mutable references (not state, just handles)
 let _midiRaf = 0;
-let _recTimer = null, _progressTimer = null;
+let _recTimer = null, _progressTimer = null, _recordingStartedAt = 0;
 let _mediaRecorder = null, _audioChunks = [];
 let _audioUrlRef = null;
 let _pianoRoll = null, _audioPlayer = null, _waveform = null;
@@ -142,7 +288,7 @@ let _audioUnlockBound = false;
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
 const getNotesForRoll = () => state.midiNotes.length ? state.midiNotes : MIDI_NOTES;
-const getBackendModel = () => state.selectedModel === 'transkun' ? 'transkun' : 'own';
+const getBackendModel = () => state.selectedModel;
 const setStatusMessage = (message, type = 'info') => {
   state.statusMessage = message;
   state.statusType = type;
@@ -1264,7 +1410,7 @@ function renderDashboard(content) {
             <div style="flex:1;min-width:0;">
               <p id="rec-label" style="font-size:11px;color:${state.isRecording?'#ef4444':'#6b7280'};margin-bottom:4px;">${state.isRecording ? '● Recording...' : 'Record piano audio'}</p>
               <button class="w-upload-btn" id="upload-btn">${ICON.upload(12,'#93c5fd')} <span>Upload audio file</span></button>
-              <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a" style="display:none;">
+              <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a,.webm" style="display:none;">
             </div>
           </div>
           ${state.fileName ? `<div class="w-file-badge w-fade-in" style="margin-bottom:12px;">${ICON.checkCircle(11,'#10b981')} <span style="font-size:11px;color:#6ee7b7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.fileName}</span></div>` : ''}
@@ -1287,7 +1433,7 @@ function renderDashboard(content) {
               <span id="m-chev" style="transition:transform 0.2s;${state.modelDropdownOpen?'transform:rotate(180deg);':''}">${ICON.chevronDown(15,'#6b7280')}</span>
             </button>
             <div id="model-dd" style="display:${state.modelDropdownOpen?'block':'none'};" class="w-model-dropdown">
-              ${['transkun','onsets'].map(m=>`
+              ${['transkun','onsets_and_frames'].map(m=>`
                 <button class="w-model-opt${state.selectedModel===m?' active':''}" data-model="${m}">
                   <div style="width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:${state.selectedModel===m?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.06)'};">
                     ${m==='transkun'?ICON.cpu(14,'white'):ICON.activity(14,'#9ca3af')}
@@ -1433,7 +1579,12 @@ function renderDashboard(content) {
     if (chev) chev.style.transform = state.modelDropdownOpen ? 'rotate(180deg)' : '';
   });
   content.querySelectorAll('.w-model-opt').forEach(btn => {
-    btn.addEventListener('click', () => { state.selectedModel = btn.dataset.model; state.modelDropdownOpen = false; renderDashboard(content); });
+    btn.addEventListener('click', () => {
+      state.selectedModel = btn.dataset.model;
+      persistSelectedModel(state.selectedModel);
+      state.modelDropdownOpen = false;
+      renderDashboard(content);
+    });
   });
 
   content.querySelector('#convert-btn').addEventListener('click', _handleConvert.bind(null, content));
@@ -1778,23 +1929,56 @@ async function _handleRecord() {
       _mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       _audioChunks = [];
 
+      _recordingStartedAt = Date.now();
+      if (_recTimer) clearTimeout(_recTimer);
+      _recTimer = setTimeout(() => {
+        if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+          _mediaRecorder.stop();
+        }
+      }, MAX_RECORDING_MS);
+
       _mediaRecorder.ondataavailable = e => { if (e.data.size > 0) _audioChunks.push(e.data); };
-      _mediaRecorder.onstop = () => {
+      _mediaRecorder.onstop = async () => {
         _stopRecordingWaveform();
         stream.getTracks().forEach(t => t.stop());
+        state.isRecording = false;
+        if (_recTimer) clearTimeout(_recTimer);
         const blobType = _mediaRecorder.mimeType || mimeType || 'audio/webm';
         const blob = new Blob(_audioChunks, { type: blobType });
         const extension = blobType.includes('ogg') ? 'ogg' : 'webm';
         const recordedFile = new File([blob], `recording.${extension}`, { type: blobType });
 
-        if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
-        _audioUrlRef = URL.createObjectURL(blob);
-        resetMidiData();
-        state.audioUrl = _audioUrlRef;
-        state.audioFile = recordedFile;
-        state.fileName = recordedFile.name;
-        state.stage = 'loaded';
-        clearStatusMessage();
+        if (blob.size > MAX_AUDIO_BYTES) {
+          state.isRecording = false;
+          setStatusMessage('Recording too large. Please record a shorter clip.', 'error');
+          renderDashboard(content);
+          return;
+        }
+
+        const durationMs = Math.max(0, Date.now() - _recordingStartedAt);
+        try {
+          const entry = await saveAudioEntry({
+            blob,
+            name: recordedFile.name,
+            source: 'recording',
+            durationMs,
+          });
+          localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
+          resetMidiData();
+          applyAudioEntryToState(entry);
+          clearStatusMessage();
+        } catch (error) {
+          if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
+          _audioUrlRef = URL.createObjectURL(blob);
+          resetMidiData();
+          state.audioUrl = _audioUrlRef;
+          state.audioFile = recordedFile;
+          state.fileName = recordedFile.name;
+          state.audioEntryId = null;
+          state.stage = 'loaded';
+          setStatusMessage('Recording stored in memory only (browser storage failed).', 'error');
+        }
+
         renderDashboard(content);
       };
       _mediaRecorder.start();
@@ -1820,43 +2004,46 @@ async function _handleUpload(e) {
   if (_recTimer) clearTimeout(_recTimer);
   if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
 
+  if (file.size > MAX_AUDIO_BYTES) {
+    setStatusMessage('Upload too large. Please choose a smaller file.', 'error');
+    renderDashboard(document.getElementById('w-content'));
+    e.target.value = '';
+    return;
+  }
+
   resetMidiData();
-  _audioUrlRef = URL.createObjectURL(file);
-  state.audioUrl = _audioUrlRef;
-  state.audioFile = file;
-  state.fileName = file.name;
-  state.stage = 'loaded';
-  clearStatusMessage();
+  try {
+    const entry = await saveAudioEntry({
+      blob: file,
+      name: file.name,
+      source: 'upload',
+      durationMs: null,
+    });
+    localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
+    applyAudioEntryToState(entry);
+    clearStatusMessage();
+  } catch (error) {
+    if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
+    _audioUrlRef = URL.createObjectURL(file);
+    state.audioUrl = _audioUrlRef;
+    state.audioFile = file;
+    state.fileName = file.name;
+    state.audioEntryId = null;
+    state.stage = 'loaded';
+    setStatusMessage('Saved in memory only (browser storage failed).', 'error');
+  }
   e.target.value = '';
 
   const content = document.getElementById('w-content');
   renderDashboard(content);
-
-  try {
-    const formData = new FormData();
-    formData.append('file', file, file.name);
-
-    const response = await fetch(`${state.apiUrl}/upload-audio`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(errorText || 'Upload endpoint failed');
-    }
-
-    setStatusMessage(`Loaded: ${file.name}`, 'success');
-  } catch (error) {
-    setStatusMessage(`Loaded locally. Server upload warning: ${error.message}`, 'error');
-  }
-
+  setStatusMessage(`Saved locally: ${file.name}`, 'success');
   renderDashboard(content);
 }
 
 async function _handleConvert(content) {
   if (state.stage !== 'loaded') return;
-  if (!state.audioFile) {
+  const audioFile = await resolveAudioForTranscription();
+  if (!audioFile) {
     setStatusMessage('Select or record an audio file first.', 'error');
     renderDashboard(content);
     return;
@@ -1876,7 +2063,7 @@ async function _handleConvert(content) {
 
   try {
     const formData = new FormData();
-    formData.append('audio', state.audioFile, state.audioFile.name || 'input.wav');
+    formData.append('audio', audioFile, audioFile.name || 'input.wav');
     formData.append('model', getBackendModel());
 
     const response = await fetch(`${state.apiUrl}/transcribe`, {
@@ -2095,11 +2282,11 @@ function renderSettings(content) {
               <div><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;font-weight:700;color:#f0f0f8;">WidiAI</span><span class="w-beta">BETA</span></div><p style="font-size:11px;color:#6b7280;">Wave MIDI AI · Version 0.9.2</p></div>
             </div>
             <div style="display:flex;flex-direction:column;gap:6px;text-align:right;">
-              ${[['gauge','TransKun v2.1'],['activity','Onsets & Frames v1.14'],['hardDrive','Storage: 1.2 GB / 5 GB'],['shield','All processing is local']].map(([ic,tx])=>`<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;"><span style="color:#4b5563;">${ICON[ic](11,'#4b5563')}</span><span style="font-size:11px;color:#4b5563;">${tx}</span></div>`).join('')}
+              ${[['gauge','TransKun v2.1'],['activity','Onsets & Frames v1.14'],['hardDrive','Storage: browser IndexedDB'],['shield','Processing runs on backend']].map(([ic,tx])=>`<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;"><span style="color:#4b5563;">${ICON[ic](11,'#4b5563')}</span><span style="font-size:11px;color:#4b5563;">${tx}</span></div>`).join('')}
             </div>
           </div>
           <div class="w-divider"></div>
-          <div style="display:flex;align-items:center;gap:8px;">${ICON.info(12,'#4b5563')}<p style="font-size:11px;color:#4b5563;">WidiAI uses state-of-the-art transformer and frame-based models to convert piano audio to MIDI. All audio processing is performed locally — no audio data leaves your device.</p></div>
+          <div style="display:flex;align-items:center;gap:8px;">${ICON.info(12,'#4b5563')}<p style="font-size:11px;color:#4b5563;">WidiAI uses state-of-the-art transformer and frame-based models to convert piano audio to MIDI. Audio is stored in your browser and sent to the backend only when you request transcription.</p></div>
         </div>
       </div>
     </div>`;
@@ -2136,6 +2323,7 @@ export function init(container) {
   injectCSS(container);
   container.className = 'widi-app';
   bindAudioUnlock();
+  persistSelectedModel(state.selectedModel);
 
   // Background glow orbs
   const orbLayer = document.createElement('div');
@@ -2186,6 +2374,7 @@ export function init(container) {
   container.appendChild(wrap);
 
   renderPage(content);
+  hydrateStoredAudio(content);
 
   // Cleanup on unmount
   return () => {

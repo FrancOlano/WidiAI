@@ -8,6 +8,14 @@
     if (!recordBtn || !canvas || !recordingStatusDiv || !recordingMessageDiv || !recordingPlayback) return;
 
     const state = (window.appState = window.appState || {});
+    const STORAGE_KEYS = {
+        lastAudioId: 'widi.lastAudioId',
+    };
+    const AUDIO_DB = {
+        name: 'widi_audio_storage',
+        version: 1,
+        store: 'audio',
+    };
 
     const canvasCtx = canvas.getContext('2d');
 
@@ -21,9 +29,72 @@
     let waveformHistory = [];
     const MAX_HISTORY = 60;
     const MAX_DURATION_MS = 5 * 60 * 1000;
-    const MAX_STORAGE_BYTES = 4_500_000;
+    const MAX_STORAGE_BYTES = 25 * 1024 * 1024;
     let recordingTimerId = null;
     let recordingStartedAt = 0;
+    let playbackUrl = null;
+
+    const openAudioDb = () => new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) {
+            reject(new Error('IndexedDB is not available in this browser.'));
+            return;
+        }
+        const request = indexedDB.open(AUDIO_DB.name, AUDIO_DB.version);
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(AUDIO_DB.store)) {
+                const store = db.createObjectStore(AUDIO_DB.store, { keyPath: 'id' });
+                store.createIndex('createdAt', 'createdAt');
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+
+    const saveAudioEntry = async ({ blob, name, durationMs }) => {
+        const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `audio_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        const entry = {
+            id,
+            name,
+            source: 'recording',
+            size: blob.size,
+            type: blob.type || 'audio/webm',
+            durationMs: durationMs || null,
+            createdAt: new Date().toISOString(),
+            blob,
+        };
+
+        const db = await openAudioDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AUDIO_DB.store, 'readwrite');
+            tx.oncomplete = () => {
+                db.close();
+                resolve(entry);
+            };
+            tx.onerror = () => {
+                db.close();
+                reject(tx.error);
+            };
+            tx.objectStore(AUDIO_DB.store).put(entry);
+        });
+    };
+
+    const loadAudioEntry = async (id) => {
+        if (!id) return null;
+        const db = await openAudioDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AUDIO_DB.store, 'readonly');
+            const req = tx.objectStore(AUDIO_DB.store).get(id);
+            req.onsuccess = () => {
+                db.close();
+                resolve(req.result || null);
+            };
+            req.onerror = () => {
+                db.close();
+                reject(req.error);
+            };
+        });
+    };
 
     // Initialize audio graph for visualization
     async function initializeAudioContext() {
@@ -65,48 +136,46 @@
         return '';
     }
 
-    // Persist the recording as a data URL in sessionStorage
-    function saveRecordingToSession(blob, durationMs, mimeType) {
+    // Persist the recording in IndexedDB
+    async function saveRecordingToStorage(blob, durationMs, mimeType) {
         if (blob.size > MAX_STORAGE_BYTES) {
             recordingStatusDiv.classList.add('error');
-            recordingMessageDiv.textContent = '✗ Recording is too large for session storage. Try a shorter recording.';
+            recordingMessageDiv.textContent = '✗ Recording is too large. Try a shorter recording.';
             return;
         }
 
-        const reader = new FileReader();
-        reader.onloadend = () => {
-            const dataUrl = reader.result;
-            const meta = {
-                mimeType,
+        try {
+            const entry = await saveAudioEntry({
+                blob,
+                name: `recording.${mimeType.includes('ogg') ? 'ogg' : 'webm'}`,
                 durationMs,
-                createdAt: new Date().toISOString(),
-            };
-
-            try {
-                sessionStorage.setItem('recordingDataUrl', dataUrl);
-                sessionStorage.setItem('recordingMeta', JSON.stringify(meta));
-                state.recordingDataUrl = dataUrl;
-                state.recordingMeta = meta;
-                updatePlaybackSource(dataUrl);
-            } catch (error) {
-                recordingStatusDiv.classList.add('error');
-                recordingMessageDiv.textContent = '✗ Recording could not be stored. Storage limit reached.';
-            }
-        };
-
-        reader.readAsDataURL(blob);
+            });
+            localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
+            state.audioEntryId = entry.id;
+            state.audioFileForTranscription = new File([entry.blob], entry.name, { type: entry.type || mimeType });
+            updatePlaybackSource(entry.blob);
+        } catch (error) {
+            recordingStatusDiv.classList.add('error');
+            recordingMessageDiv.textContent = '✗ Recording could not be stored. Storage limit reached.';
+        }
     }
 
     // Load the latest stored recording into the player
-    function updatePlaybackSource(dataUrl) {
-        recordingPlayback.src = dataUrl;
+    function updatePlaybackSource(blob) {
+        if (playbackUrl) URL.revokeObjectURL(playbackUrl);
+        playbackUrl = URL.createObjectURL(blob);
+        recordingPlayback.src = playbackUrl;
         recordingPlayback.classList.add('is-visible');
         recordingPlayback.load();
     }
 
-    const storedRecording = sessionStorage.getItem('recordingDataUrl');
-    if (storedRecording) {
-        updatePlaybackSource(storedRecording);
+    const storedRecordingId = localStorage.getItem(STORAGE_KEYS.lastAudioId);
+    if (storedRecordingId) {
+        loadAudioEntry(storedRecordingId).then((entry) => {
+            if (entry && entry.blob) {
+                updatePlaybackSource(entry.blob);
+            }
+        }).catch(() => {});
     }
 
     // Draw the live waveform visualization on the canvas
@@ -182,7 +251,7 @@
                 mediaRecorder.addEventListener('stop', () => {
                     const blob = new Blob(recordedChunks, { type: mimeType || 'audio/webm' });
                     const durationMs = Math.max(0, Date.now() - recordingStartedAt);
-                    saveRecordingToSession(blob, durationMs, blob.type || 'audio/webm');
+                    saveRecordingToStorage(blob, durationMs, blob.type || 'audio/webm');
                 });
 
                 isRecording = true;

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import os
+import base64
+import binascii
 import shutil
 import subprocess
-import shutil
 import sys
-import uuid
-from datetime import datetime
+import tempfile
 from pathlib import Path
+from typing import Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from backend.custom_transcriber import transcribe_with_own_model
@@ -27,42 +27,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RECORDINGS_DIR = "recordings"
+ALLOWED_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm"}
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
-UPLOADS_DIR = Path("uploads")
-MIDI_DIR = Path("midi_outputs")
-
-UPLOADS_DIR.mkdir(exist_ok=True)
-MIDI_DIR.mkdir(exist_ok=True)
-
-# Create recordings directory if it doesn't exist
-if not os.path.exists(RECORDINGS_DIR):
-    os.makedirs(RECORDINGS_DIR)
-
-def cleanup_files(paths: list[str]):
-    """Delete temporary files after sending response."""
-    for path in paths:
-        try:
-            Path(path).unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-
-async def save_upload_file(upload_file: UploadFile, destination: Path):
-    """Save uploaded audio file to disk."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    with destination.open("wb") as buffer:
-        while True:
-            chunk = await upload_file.read(1024 * 1024)
-            if not chunk:
-                break
-            buffer.write(chunk)
-
-
-def run_transkun(audio_path: Path, output_path: Path):
+def run_transkun(audio_path: Path, output_path: Path) -> None:
     audio_path = str(audio_path)
     output_path = str(output_path)
 
@@ -102,85 +71,84 @@ def run_transkun(audio_path: Path, output_path: Path):
         raise RuntimeError("TransKun finished but no MIDI file was created.")
 
 
+def _normalize_model_name(model_name: Optional[str]) -> str:
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Missing model.")
+    value = model_name.strip().lower()
+    if value in {"transkun"}:
+        return "transkun"
+    if value in {"onsets_and_frames", "onsets and frames", "onsets-frames", "onsets&frames", "own"}:
+        return "onsets_and_frames"
+    raise HTTPException(status_code=400, detail="Invalid model. Use 'transkun' or 'onsets_and_frames'.")
+
+
+def _decode_base64_audio(payload: str) -> bytes:
+    if not payload:
+        raise HTTPException(status_code=400, detail="Missing audio payload.")
+    value = payload.strip()
+    if value.startswith("data:") and "," in value:
+        value = value.split(",", 1)[1]
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio payload.") from exc
+
+
+def _select_suffix(filename: Optional[str]) -> str:
+    suffix = Path(filename or "input.wav").suffix.lower()
+    return suffix if suffix in ALLOWED_SUFFIXES else ".wav"
+
+
 @app.post("/transcribe")
 async def transcribe_audio(
-    background_tasks: BackgroundTasks,
-    audio: UploadFile = File(...),
-    model_name: str = Form(..., alias="model"),
+    request: Request,
+    audio: Optional[UploadFile] = File(None),
+    model_name: Optional[str] = Form(None, alias="model"),
 ):
-    selected_model = model_name.strip().lower()
+    if audio is None:
+        if not request.headers.get("content-type", "").lower().startswith("application/json"):
+            raise HTTPException(status_code=400, detail="Missing audio upload or JSON payload.")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+        model_name = model_name or payload.get("model")
+        audio_bytes = _decode_base64_audio(payload.get("audio_base64") or payload.get("audio"))
+        filename = payload.get("filename") or "input.wav"
+    else:
+        model_name = model_name or ""
+        audio_bytes = await audio.read()
+        filename = audio.filename or "input.wav"
 
-    if selected_model not in {"own", "transkun"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid model. Use 'own' or 'transkun'.",
-        )
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file too large.")
 
-    original_suffix = Path(audio.filename or "input.wav").suffix.lower()
-    allowed_suffixes = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
-    suffix = original_suffix if original_suffix in allowed_suffixes else ".wav"
-
-    job_id = uuid.uuid4().hex
-    input_path = UPLOADS_DIR / f"{job_id}{suffix}"
-    output_path = MIDI_DIR / f"{job_id}_{selected_model}.mid"
+    selected_model = _normalize_model_name(model_name)
+    suffix = _select_suffix(filename)
 
     try:
-        await save_upload_file(audio, input_path)
+        with tempfile.TemporaryDirectory(prefix="widi_") as tmp_dir:
+            input_path = Path(tmp_dir) / f"input{suffix}"
+            output_path = Path(tmp_dir) / "output.mid"
+            input_path.write_bytes(audio_bytes)
 
-        if selected_model == "own":
-            await run_in_threadpool(transcribe_with_own_model, input_path, output_path)
-        else:
-            await run_in_threadpool(run_transkun, input_path, output_path)
+            if selected_model == "onsets_and_frames":
+                await run_in_threadpool(transcribe_with_own_model, input_path, output_path)
+            else:
+                await run_in_threadpool(run_transkun, input_path, output_path)
 
-        # Only register cleanup once, via background_tasks — do NOT also pass
-        # background_tasks to FileResponse or the tasks run twice.
-        background_tasks.add_task(cleanup_files, [str(input_path), str(output_path)])
+            midi_bytes = output_path.read_bytes()
 
-        return FileResponse(
-            path=str(output_path),
+        return Response(
+            content=midi_bytes,
             media_type="audio/midi",
-            filename=f"transcription_{selected_model}.mid",
+            headers={
+                "Content-Disposition": f"attachment; filename=transcription_{selected_model}.mid"
+            },
         )
-
-    except Exception as e:
-        cleanup_files([str(input_path), str(output_path)])
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/upload-audio")
-async def upload_audio(file: UploadFile = File(...)):
-    """Upload an audio file"""
-    try:
-        # Validate file type
-        allowed_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        
-        if file_ext not in allowed_extensions:
-            return JSONResponse(
-                {"status": "error", "message": f"File type not supported. Allowed: {', '.join(allowed_extensions)}"},
-                status_code=400,
-            )
-        
-        # Generate unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{RECORDINGS_DIR}/uploaded_{timestamp}{file_ext}"
-        
-        # Save uploaded file
-        with open(filename, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        return JSONResponse(
-            {
-                "status": "success",
-                "message": "Audio file uploaded successfully",
-                "filename": filename,
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500,
-        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 if __name__ == "__main__":
     import uvicorn
