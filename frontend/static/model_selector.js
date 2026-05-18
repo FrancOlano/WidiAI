@@ -3,7 +3,11 @@
     if (!modelSelect) return;
 
     const state = (window.appState = window.appState || {});
-    const defaultModel = modelSelect.dataset.defaultModel || modelSelect.options[0]?.value || 'transkun';
+    const STORAGE_KEY = 'widi.selectedModel';
+    const defaultModel = localStorage.getItem(STORAGE_KEY)
+        || modelSelect.dataset.defaultModel
+        || modelSelect.options[0]?.value
+        || 'transkun';
     const fallbackModels = [
         { value: 'transkun', label: 'Transkun' },
         { value: 'onsets_and_frames', label: 'Onsets and Frames' },
@@ -25,11 +29,14 @@
         selectedModel = modelSelect.value;
     }
 
-    state.selectedModel = selectedModel;
-    window.selectedModel = selectedModel;
+    state.selectedModel = selectedModel === 'onsets' ? 'onsets_and_frames' : selectedModel;
+    window.selectedModel = state.selectedModel;
+    localStorage.setItem(STORAGE_KEY, state.selectedModel);
 
     modelSelect.addEventListener('change', (event) => {
-        state.selectedModel = event.target.value;
+        const value = event.target.value;
+        state.selectedModel = value === 'onsets' ? 'onsets_and_frames' : value;
         window.selectedModel = state.selectedModel;
+        localStorage.setItem(STORAGE_KEY, state.selectedModel);
     });
 })();

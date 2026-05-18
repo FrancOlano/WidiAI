@@ -6,7 +6,59 @@
     if (!convertBtn || !transcriptionStatusDiv || !transcriptionMessageDiv) return;
 
     const state = (window.appState = window.appState || {});
-    const API_URL = state.apiUrl || 'http://localhost:8000';
+    const STORAGE_KEYS = {
+        selectedModel: 'widi.selectedModel',
+        lastAudioId: 'widi.lastAudioId',
+        apiUrl: 'widi.apiUrl',
+    };
+    const AUDIO_DB = {
+        name: 'widi_audio_storage',
+        version: 1,
+        store: 'audio',
+    };
+    const getApiUrl = () => {
+        const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
+            ? window.__WIDI_ENV__.API_URL.trim()
+            : '';
+        const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
+        const base = state.apiUrl || fromStorage || fromEnv || 'http://localhost:8000';
+        return base.replace(/\/+$/, '');
+    };
+    const API_URL = getApiUrl();
+
+    const openAudioDb = () => new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) {
+            reject(new Error('IndexedDB is not available in this browser.'));
+            return;
+        }
+        const request = indexedDB.open(AUDIO_DB.name, AUDIO_DB.version);
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(AUDIO_DB.store)) {
+                const store = db.createObjectStore(AUDIO_DB.store, { keyPath: 'id' });
+                store.createIndex('createdAt', 'createdAt');
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+
+    const loadAudioEntry = async (id) => {
+        if (!id) return null;
+        const db = await openAudioDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(AUDIO_DB.store, 'readonly');
+            const req = tx.objectStore(AUDIO_DB.store).get(id);
+            req.onsuccess = () => {
+                db.close();
+                resolve(req.result || null);
+            };
+            req.onerror = () => {
+                db.close();
+                reject(req.error);
+            };
+        });
+    };
 
     function setTranscriptionMessage(message, type = '') {
         transcriptionStatusDiv.classList.remove('error', 'success', 'loading');
@@ -26,7 +78,15 @@
             window.midiMenu.clearMidiDownload();
         }
 
-        const audioFile = state.audioFileForTranscription;
+        let audioFile = state.audioFileForTranscription;
+        if (!audioFile) {
+            const entryId = state.audioEntryId || localStorage.getItem(STORAGE_KEYS.lastAudioId);
+            const entry = await loadAudioEntry(entryId);
+            if (entry && entry.blob) {
+                audioFile = new File([entry.blob], entry.name, { type: entry.type || entry.blob.type || 'audio/wav' });
+                state.audioFileForTranscription = audioFile;
+            }
+        }
         if (!audioFile) {
             setTranscriptionMessage(
                 'No audio file selected yet. The upload component must provide the file first.',
@@ -35,9 +95,12 @@
             return;
         }
 
+        const storedModel = state.selectedModel || window.selectedModel || localStorage.getItem(STORAGE_KEYS.selectedModel) || 'transkun';
+        const modelName = storedModel === 'onsets' ? 'onsets_and_frames' : storedModel;
+
         const formData = new FormData();
-        formData.append('audio', audioFile);
-        formData.append('model', state.selectedModel || window.selectedModel || 'transkun');
+        formData.append('audio', audioFile, audioFile.name || 'input.wav');
+        formData.append('model', modelName);
 
         convertBtn.disabled = true;
         setTranscriptionMessage('Converting audio to MIDI...', 'loading');

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import librosa
 import numpy as np
@@ -326,8 +326,8 @@ def note_extract(
 
 
 def transcribe_with_own_model(
-    audio_path: str | Path,
-    midi_path: str | Path,
+    audio_path: Union[str, Path],
+    midi_path: Union[str, Path],
     config_override: Optional[dict] = None,
 ) -> Path:
     config = CONFIG_INFERENCE.copy()

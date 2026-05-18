@@ -11,3 +11,5 @@ venv
 midi_outputs
 recordings
 uploads
+
+.env
