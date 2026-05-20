@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response, FileResponse         
+from fastapi.staticfiles import StaticFiles                  
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -17,6 +19,8 @@ from starlette.concurrency import run_in_threadpool
 from backend.custom_transcriber import transcribe_with_own_model
 
 app = FastAPI()
+
+
 
 # Enable CORS for frontend requests
 app.add_middleware(
@@ -26,6 +30,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+
+@app.get("/")
+async def serve_index():
+    return FileResponse("frontend/templates/index.html")
 
 ALLOWED_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm"}
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
