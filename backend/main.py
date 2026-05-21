@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import shutil
 import subprocess
 import sys
@@ -60,12 +61,30 @@ def run_transkun(audio_path: Path, output_path: Path) -> None:
             "Activate your project venv and run: pip install transkun"
         )
 
+    env = os.environ.copy()
+    path_entries = []
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffmpeg_bin and ffprobe_bin:
+        path_entries.append(str(Path(ffmpeg_bin).parent))
+    else:
+        winget_packages = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
+        for candidate in winget_packages.glob("Gyan.FFmpeg_*/*/bin"):
+            if (candidate / "ffmpeg.exe").exists() and (candidate / "ffprobe.exe").exists():
+                path_entries.append(str(candidate))
+                break
+
+    path_entries.append(env.get("PATH", ""))
+    env["PATH"] = os.pathsep.join(path_entries)
+
     try:
         subprocess.run(
             [transkun_bin, audio_path, output_path],
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or e.stdout or ""
