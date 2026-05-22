@@ -719,7 +719,7 @@ function injectCSS(container) {
 .w-panel-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:11px;color:#a1a1aa;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;}
 
 /* Dashboard Layout */
-.w-dashboard{display:flex;flex-direction:column;flex:1;padding:20px 24px 0;gap:14px;overflow:hidden;min-width:0;}
+.w-dashboard{display:flex;flex-direction:column;flex:1;padding:20px 24px 24px;gap:14px;overflow-y:auto;overflow-x:hidden;min-width:0;}
 .w-top-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);gap:14px;min-width:0;}
 .w-top-grid > .w-panel{min-width:0;}
 
@@ -809,18 +809,31 @@ function injectCSS(container) {
 .w-convert-btn{width:100%;border-radius:14px;padding:14px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:13px;font-weight:600;transition:all 0.35s cubic-bezier(0.4,0,0.2,1);}
 
 /* Piano Roll - Premium Container */
-.w-piano-wrap{border-radius:20px 20px 0 0;overflow:hidden;flex-shrink:0;height:330px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);border-bottom:none;box-shadow:0 -4px 24px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;}
-.w-piano-wrap.edit-mode{height:460px;}
+.w-piano-wrap{border-radius:20px 20px 0 0;overflow:hidden;flex-shrink:0;height:330px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);border-bottom:none;box-shadow:0 -4px 24px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;display:flex;flex-direction:column;}
+.w-piano-wrap.edit-mode{height:clamp(750px,100vh,980px);min-height:750px;}
+.w-piano-wrap.edit-mode .w-piano-body{min-height:530px;}
 .w-piano-header{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(0,0,0,0.4),rgba(0,0,0,0.3));backdrop-filter:blur(12px);}
-.w-piano-body{height:calc(100% - 41px);}
+.w-piano-body{flex:1;min-height:180px;}
 .w-live-badge{display:flex;align-items:center;gap:7px;border-radius:24px;padding:5px 12px;background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.3);box-shadow:0 0 12px rgba(16,185,129,0.15);}
 @keyframes blink{0%,100%{opacity:1;}50%{opacity:0.25;}}
 .w-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;box-shadow:0 0 8px rgba(16,185,129,0.8);animation:blink 1.2s infinite;}
 .w-piano-meta{display:flex;align-items:center;gap:10px;}
+.w-edit-pill{display:flex;align-items:center;gap:7px;border-radius:999px;padding:5px 12px;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.32);box-shadow:0 0 12px rgba(139,92,246,0.14);}
+.w-edit-pill-dot{width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 8px rgba(167,139,250,0.8);}
 .w-note-edit-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
 .w-note-edit-btn:hover:not(:disabled){background:rgba(139,92,246,0.14);border-color:rgba(139,92,246,0.34);color:#c4b5fd;}
 .w-note-edit-btn.active{background:rgba(139,92,246,0.2);border-color:rgba(139,92,246,0.44);color:#ddd6fe;box-shadow:0 0 12px rgba(139,92,246,0.22);}
 .w-note-edit-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-edit-help{padding:10px 14px 12px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(139,92,246,0.08),rgba(59,130,246,0.04));}
+.w-edit-help-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.w-edit-help-head p{font-size:10px;color:#ddd6fe;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;}
+.w-edit-help-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
+.w-edit-help-card{border-radius:10px;padding:8px 9px;background:rgba(10,10,18,0.5);border:1px solid rgba(255,255,255,0.08);box-shadow:0 1px 0 rgba(255,255,255,0.04) inset;min-width:0;}
+.w-edit-help-card p{line-height:1.25;}
+.w-edit-help-title{font-size:10px;color:#c4b5fd;font-weight:700;margin-bottom:4px;}
+.w-edit-help-desc{font-size:10px;color:#a1a1aa;}
+.w-keycaps{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;}
+.w-keycap{font-size:9px;color:#e5e7eb;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:2px 6px;font-weight:700;letter-spacing:0.02em;}
 
 /* History Page */
 .w-history{display:flex;flex-direction:column;flex:1;overflow:hidden;padding:20px 24px;gap:14px;}
@@ -919,6 +932,9 @@ function injectCSS(container) {
 }
 @media (max-width: 1040px){
   .w-top-grid{grid-template-columns:minmax(0,1fr);}
+  .w-piano-wrap.edit-mode{height:clamp(690px,96vh,860px);min-height:690px;}
+  .w-piano-wrap.edit-mode .w-piano-body{min-height:450px;}
+  .w-edit-help-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
   `;
   container.appendChild(style);
@@ -971,11 +987,15 @@ class PianoRoll {
 
   _setCursor(y, noteMode = null) {
     if (this.draggingNote) {
-      this.canvas.style.cursor = this.draggingNote.mode === 'duration' ? 'ns-resize' : 'ew-resize';
+      this.canvas.style.cursor = (this.draggingNote.mode === 'duration' || this.draggingNote.mode === 'time')
+        ? 'ns-resize'
+        : 'ew-resize';
       return;
     }
     if (this.editMode && !this.isPlaying && y < this.H - KEY_H && noteMode) {
-      this.canvas.style.cursor = noteMode === 'duration' ? 'ns-resize' : 'ew-resize';
+      this.canvas.style.cursor = (noteMode === 'duration' || noteMode === 'time')
+        ? 'ns-resize'
+        : 'ew-resize';
       return;
     }
     this.canvas.style.cursor = y >= this.H - KEY_H ? 'pointer' : 'default';
@@ -1011,12 +1031,15 @@ class PianoRoll {
       noteRef: hit.noteRef,
       mode: hit.mode || 'pitch',
       startDuration: Math.max(0.03, Number(hit.noteRef.duration) || 0.12),
+      startStartTime: Math.max(0, Number(hit.noteRef.startTime) || 0),
       startClientY: clientY,
       changed: false,
     };
     this.hoverNoteIndex = hit.index;
     this.hoverNoteMode = this.draggingNote.mode;
-    this.canvas.style.cursor = this.draggingNote.mode === 'duration' ? 'ns-resize' : 'ew-resize';
+    this.canvas.style.cursor = (this.draggingNote.mode === 'duration' || this.draggingNote.mode === 'time')
+      ? 'ns-resize'
+      : 'ew-resize';
     return true;
   }
 
@@ -1105,8 +1128,48 @@ class PianoRoll {
     return this._deleteNoteAtIndex(idx);
   }
 
+  _getActiveNoteIndex() {
+    if (this.hoverNoteIndex >= 0) return this.hoverNoteIndex;
+    if (this.selectedNoteIndex >= 0) return this.selectedNoteIndex;
+    return -1;
+  }
+
+  _duplicateSelectedNote() {
+    const idx = this._getActiveNoteIndex();
+    if (idx < 0 || idx >= this.notes.length) return false;
+
+    const source = this.notes[idx];
+    const duration = Math.max(0.03, Number(source.duration) || 0.12);
+    const duplicate = {
+      note: Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(source.note) || MIDI_LO))),
+      startTime: Math.max(0, (Number(source.startTime) || 0) + duration),
+      duration,
+      velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
+    };
+
+    this.notes.push(duplicate);
+    this.selectedNoteIndex = this.notes.length - 1;
+    this.hoverNoteIndex = this.selectedNoteIndex;
+    this.hoverNoteMode = 'pitch';
+    this._emitNotesMutation();
+    return true;
+  }
+
   _updateNoteDrag(clientX, clientY) {
     if (!this.draggingNote || !this.draggingNote.noteRef) return;
+
+    if (this.draggingNote.mode === 'time') {
+      const pps = this._getRollPixelsPerSecond();
+      const deltaSec = (this.draggingNote.startClientY - clientY) / pps;
+      const nextStartTime = Math.max(0, this.draggingNote.startStartTime + deltaSec);
+
+      if (Math.abs(nextStartTime - this.draggingNote.noteRef.startTime) > 0.0001) {
+        this.draggingNote.noteRef.startTime = nextStartTime;
+        this.draggingNote.changed = true;
+        if (this.onNotesChange) this.onNotesChange(this.notes);
+      }
+      return;
+    }
 
     if (this.draggingNote.mode === 'duration') {
       const pps = this._getRollPixelsPerSecond();
@@ -1174,6 +1237,7 @@ class PianoRoll {
         if (this.editMode && !this.isPlaying && y < this.H - KEY_H) {
           const hit = this._hitNote(x, y);
           if (hit) {
+            if (e.shiftKey) hit.mode = 'time';
             this._startNoteDrag(hit, e.clientY);
             return;
           }
@@ -1235,10 +1299,63 @@ class PianoRoll {
       },
       wk: e => {
         if (!this.editMode || this.isPlaying) return;
-        if (e.key !== 'Delete' && e.key !== 'Backspace') return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
-        if (this._deleteHoveredOrSelectedNote()) {
+
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (this._deleteHoveredOrSelectedNote()) {
+            e.preventDefault();
+          }
+          return;
+        }
+
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
+          if (this._duplicateSelectedNote()) {
+            e.preventDefault();
+          }
+          return;
+        }
+
+        const idx = this._getActiveNoteIndex();
+        if (idx < 0 || idx >= this.notes.length) return;
+        const note = this.notes[idx];
+        let changed = false;
+
+        if (e.key === 'ArrowRight') {
+          const step = e.shiftKey ? 12 : 1;
+          const next = Math.min(MIDI_HI, Math.round(Number(note.note) || MIDI_LO) + step);
+          if (next !== note.note) {
+            note.note = next;
+            changed = true;
+          }
+        } else if (e.key === 'ArrowLeft') {
+          const step = e.shiftKey ? 12 : 1;
+          const next = Math.max(MIDI_LO, Math.round(Number(note.note) || MIDI_LO) - step);
+          if (next !== note.note) {
+            note.note = next;
+            changed = true;
+          }
+        } else if (e.key === 'ArrowUp') {
+          const step = e.shiftKey ? 0.25 : 0.1;
+          const next = Math.max(0, (Number(note.startTime) || 0) + step);
+          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
+            note.startTime = next;
+            changed = true;
+          }
+        } else if (e.key === 'ArrowDown') {
+          const step = e.shiftKey ? 0.25 : 0.1;
+          const next = Math.max(0, (Number(note.startTime) || 0) - step);
+          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
+            note.startTime = next;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          this.selectedNoteIndex = idx;
+          this.hoverNoteIndex = idx;
+          this.hoverNoteMode = 'pitch';
+          this._emitNotesMutation();
           e.preventDefault();
         }
       },
@@ -1785,10 +1902,52 @@ function renderDashboard(content) {
             <div id="piano-status">
               ${state.midiPlaying
                 ? `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`
-                : `<span style="font-size:10px;color:#4b5563;">${state.noteEditMode && state.stage==='ready' ? 'Edit mode · L/R pitch · top edge U/D duration' : (state.stage==='ready' ? 'Ready · Press play' : 'Demo preview')}</span>`}
+                : `${state.noteEditMode && state.stage==='ready'
+                  ? `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`
+                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Demo preview'}</span>`}`}
             </div>
           </div>
         </div>
+        ${state.noteEditMode && state.stage === 'ready' ? `
+          <div class="w-edit-help">
+            <div class="w-edit-help-head">
+              <div style="width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 10px rgba(167,139,250,0.8);"></div>
+              <p>Editing Guide</p>
+            </div>
+            <div class="w-edit-help-grid">
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Pitch</p>
+                <p class="w-edit-help-desc">Change note pitch left or right.</p>
+                <div class="w-keycaps"><span class="w-keycap">Drag L/R</span><span class="w-keycap">Arrow Left/Right</span><span class="w-keycap">Shift + Arrow = Octave</span></div>
+              </div>
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Duration</p>
+                <p class="w-edit-help-desc">Drag the top edge up or down.</p>
+                <div class="w-keycaps"><span class="w-keycap">Top edge</span><span class="w-keycap">U / D</span></div>
+              </div>
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Time</p>
+                <p class="w-edit-help-desc">Move note timing without changing pitch.</p>
+                <div class="w-keycaps"><span class="w-keycap">Shift + Drag</span><span class="w-keycap">Arrow Up/Down</span><span class="w-keycap">Shift + Arrow = Large Step</span></div>
+              </div>
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Add</p>
+                <p class="w-edit-help-desc">Create a new note in empty roll space.</p>
+                <div class="w-keycaps"><span class="w-keycap">Double click</span></div>
+              </div>
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Delete</p>
+                <p class="w-edit-help-desc">Remove selected or hovered note.</p>
+                <div class="w-keycaps"><span class="w-keycap">Delete</span><span class="w-keycap">Right click</span></div>
+              </div>
+              <div class="w-edit-help-card">
+                <p class="w-edit-help-title">Duplicate</p>
+                <p class="w-edit-help-desc">Duplicate active note to the next slot.</p>
+                <div class="w-keycaps"><span class="w-keycap">Cmd/Ctrl</span><span class="w-keycap">+ D</span></div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
         <div class="w-piano-body" id="piano-body"></div>
       </div>
     </div>`;
@@ -1809,8 +1968,8 @@ function renderDashboard(content) {
         const rebuilt = _rebuildMidiBlobFromEditedNotes();
         setStatusMessage(
           rebuilt
-            ? 'Note updated. Playback and MIDI export were refreshed.'
-            : 'Note updated for playback, but MIDI export refresh failed.',
+            ? 'MIDI notes updated. Playback and MIDI export were refreshed.'
+            : 'MIDI notes updated for playback, but MIDI export refresh failed.',
           rebuilt ? 'success' : 'error'
         );
         renderDashboard(content);
@@ -1857,7 +2016,7 @@ function renderDashboard(content) {
     state.noteEditMode = !state.noteEditMode;
     setStatusMessage(
       state.noteEditMode
-        ? 'Edit mode enabled. Left/right changes pitch. Drag the top edge up/down to change duration.'
+        ? 'Edit mode enabled. Use the visual guide in the piano roll for shortcuts and gestures.'
         : 'Edit mode disabled.',
       'success'
     );
@@ -1888,7 +2047,7 @@ function _updateSeek(content) {
     if (state.midiPlaying) {
       ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
     } else if (state.noteEditMode && state.stage === 'ready') {
-      ps.innerHTML = `<span style="font-size:10px;color:#a78bfa;">Edit mode · L/R pitch · top edge U/D duration</span>`;
+      ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
     } else {
       ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Demo preview'}</span>`;
     }
