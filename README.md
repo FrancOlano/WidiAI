@@ -100,7 +100,7 @@ MTL_S104/
 
 ## Tech Stack
 
-- Python 3.10+
+- Python 3.8+
 - FastAPI + Uvicorn
 - PyTorch
 - librosa
@@ -110,7 +110,7 @@ MTL_S104/
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.8 or newer
 - `pip`
 - Dependencies listed in [`requirements.txt`](requirements.txt)
 
@@ -149,6 +149,31 @@ python scripts/generate_frontend_env.py
 
 - API docs: `http://localhost:8000/docs`
 - Serve the frontend separately and point it at the API base URL.
+
+### Install scripts (optional)
+
+Use [scripts/install_windows.ps1](scripts/install_windows.ps1) or [scripts/install_linux.sh](scripts/install_linux.sh) to install dependencies, create a virtual environment, and generate [frontend/static/env.js](frontend/static/env.js).
+
+Windows (PowerShell):
+
+```powershell
+./scripts/install_windows.ps1
+```
+
+Linux:
+
+```bash
+chmod +x ./scripts/install_linux.sh
+./scripts/install_linux.sh
+```
+
+Common options:
+
+- `--api-url` / `-ApiUrl`: backend URL for `WIDI_API_URL`
+- `--venv` / `-VenvDir`: virtual environment directory
+- `--skip-system-deps`: skip installing FFmpeg and system packages
+- `--skip-frontend-env`: skip generating [frontend/static/env.js](frontend/static/env.js)
+- `--skip-transkun-check`: skip validating `transkun` in the venv
 
 ## Configuration
 
