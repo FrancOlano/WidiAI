@@ -944,6 +944,7 @@ class PianoRoll {
     this.pressedKeys = new Set();
     this.noteHitboxes = [];
     this.hoverNoteIndex = -1;
+    this.selectedNoteIndex = -1;
     this.hoverNoteMode = null;
     this.draggingNote = null;
     this.animId = 0;
@@ -1004,6 +1005,7 @@ class PianoRoll {
 
   _startNoteDrag(hit, clientY) {
     if (!hit || !hit.noteRef) return false;
+    this.selectedNoteIndex = hit.index;
     this.draggingNote = {
       index: hit.index,
       noteRef: hit.noteRef,
@@ -1043,6 +1045,66 @@ class PianoRoll {
     return closest;
   }
 
+  _rollTimeAtY(y) {
+    const rollHeight = this.H - KEY_H;
+    const clampedY = Math.max(0, Math.min(rollHeight, y));
+    const pps = this._getRollPixelsPerSecond();
+    return Math.max(0, this.currentTime + (rollHeight - clampedY) / pps);
+  }
+
+  _emitNotesMutation() {
+    if (this.onNotesChange) this.onNotesChange(this.notes);
+    if (this.onEditCommit) this.onEditCommit(this.notes);
+  }
+
+  _addNoteAt(x, y) {
+    const key = this._keyAtX(x);
+    if (!key) return false;
+
+    const note = {
+      note: key.midi,
+      startTime: this._rollTimeAtY(y),
+      duration: 0.35,
+      velocity: 96,
+    };
+
+    this.notes.push(note);
+    this.selectedNoteIndex = this.notes.length - 1;
+    this.hoverNoteIndex = this.selectedNoteIndex;
+    this.hoverNoteMode = 'pitch';
+    this._playNote(note.note);
+    this._emitNotesMutation();
+    return true;
+  }
+
+  _deleteNoteAtIndex(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.notes.length) return false;
+
+    this.notes.splice(index, 1);
+
+    if (this.draggingNote) {
+      if (this.draggingNote.index === index) {
+        this.draggingNote = null;
+      } else if (this.draggingNote.index > index) {
+        this.draggingNote.index -= 1;
+      }
+    }
+
+    if (this.hoverNoteIndex === index) this.hoverNoteIndex = -1;
+    if (this.selectedNoteIndex === index) this.selectedNoteIndex = -1;
+    if (this.hoverNoteIndex > index) this.hoverNoteIndex -= 1;
+    if (this.selectedNoteIndex > index) this.selectedNoteIndex -= 1;
+    this.hoverNoteMode = null;
+
+    this._emitNotesMutation();
+    return true;
+  }
+
+  _deleteHoveredOrSelectedNote() {
+    const idx = this.hoverNoteIndex >= 0 ? this.hoverNoteIndex : this.selectedNoteIndex;
+    return this._deleteNoteAtIndex(idx);
+  }
+
   _updateNoteDrag(clientX, clientY) {
     if (!this.draggingNote || !this.draggingNote.noteRef) return;
 
@@ -1074,6 +1136,7 @@ class PianoRoll {
 
   _finishNoteDrag(shouldCommit = true) {
     if (!this.draggingNote) return;
+    this.selectedNoteIndex = this.draggingNote.index;
     const changed = Boolean(this.draggingNote.changed);
     this.draggingNote = null;
     this.hoverNoteMode = null;
@@ -1114,6 +1177,7 @@ class PianoRoll {
             this._startNoteDrag(hit, e.clientY);
             return;
           }
+          this.selectedNoteIndex = -1;
         }
         const k = this._hitTest(x, y);
         if (k) press(k.midi);
@@ -1151,6 +1215,33 @@ class PianoRoll {
       },
       wu: () => { this._finishNoteDrag(); releaseAll(); },
       wb: () => { this._finishNoteDrag(); releaseAll(); this.canvas.style.cursor = 'default'; },
+      db: e => {
+        if (!this.editMode || this.isPlaying) return;
+        const { x, y } = xy(e);
+        if (y >= this.H - KEY_H) return;
+        if (this._hitNote(x, y)) return;
+        e.preventDefault();
+        this._addNoteAt(x, y);
+      },
+      cm: e => {
+        if (!this.editMode || this.isPlaying) return;
+        const { x, y } = xy(e);
+        if (y >= this.H - KEY_H) return;
+        const hit = this._hitNote(x, y);
+        if (!hit) return;
+        e.preventDefault();
+        this.selectedNoteIndex = hit.index;
+        this._deleteNoteAtIndex(hit.index);
+      },
+      wk: e => {
+        if (!this.editMode || this.isPlaying) return;
+        if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+        const active = document.activeElement;
+        if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
+        if (this._deleteHoveredOrSelectedNote()) {
+          e.preventDefault();
+        }
+      },
       ts: e => { e.preventDefault(); releaseAll(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) press(k.midi); }); },
       tm: e => { e.preventDefault(); releaseAll(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) press(k.midi); }); },
       te: e => { e.preventDefault(); const still = new Set(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) still.add(k.midi); }); this.pressedKeys.forEach(m => { if (!still.has(m)) release(m); }); },
@@ -1159,12 +1250,15 @@ class PianoRoll {
     c.addEventListener('mousemove', this._h.mm);
     c.addEventListener('mouseup', this._h.mu);
     c.addEventListener('mouseleave', this._h.ml);
+    c.addEventListener('dblclick', this._h.db);
+    c.addEventListener('contextmenu', this._h.cm);
     c.addEventListener('touchstart', this._h.ts, { passive: false });
     c.addEventListener('touchmove', this._h.tm, { passive: false });
     c.addEventListener('touchend', this._h.te, { passive: false });
     window.addEventListener('mousemove', this._h.wm);
     window.addEventListener('mouseup', this._h.wu);
     window.addEventListener('blur', this._h.wb);
+    window.addEventListener('keydown', this._h.wk);
   }
 
   _setup() {
@@ -1233,10 +1327,11 @@ class PianoRoll {
       if(h<=0) return;
 
       this.noteHitboxes.push({ index, x, y, w, h, noteRef: n });
-      const selected = this.draggingNote && this.draggingNote.index === index;
-      const hovered = !selected && this.hoverNoteIndex === index;
+      const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
+      const selected = selectedByDrag || (!this.draggingNote && this.selectedNoteIndex === index);
+      const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const hoverMode = hovered ? this.hoverNoteMode : null;
-      const selectedMode = selected && this.draggingNote ? this.draggingNote.mode : null;
+      const selectedMode = selectedByDrag && this.draggingNote ? this.draggingNote.mode : null;
 
       ctx.shadowColor=color; ctx.shadowBlur=10; ctx.fillStyle=color; ctx.globalAlpha=0.7+(n.velocity/127)*0.3;
       this._rr(ctx,x,y,w,h,2); ctx.fill(); ctx.globalAlpha=1; ctx.shadowBlur=0;
@@ -1381,6 +1476,7 @@ class PianoRoll {
   setEditMode(enabled) {
     this.editMode = Boolean(enabled);
     this.hoverNoteIndex = -1;
+    this.selectedNoteIndex = -1;
     this.hoverNoteMode = null;
     if (!this.editMode) this._finishNoteDrag();
   }
@@ -1393,12 +1489,15 @@ class PianoRoll {
     c.removeEventListener('mousemove', this._h.mm);
     c.removeEventListener('mouseup', this._h.mu);
     c.removeEventListener('mouseleave', this._h.ml);
+    c.removeEventListener('dblclick', this._h.db);
+    c.removeEventListener('contextmenu', this._h.cm);
     c.removeEventListener('touchstart', this._h.ts);
     c.removeEventListener('touchmove', this._h.tm);
     c.removeEventListener('touchend', this._h.te);
     window.removeEventListener('mousemove', this._h.wm);
     window.removeEventListener('mouseup', this._h.wu);
     window.removeEventListener('blur', this._h.wb);
+    window.removeEventListener('keydown', this._h.wk);
     this._finishNoteDrag(false);
     this.pressedKeys.clear();
     c.remove();
