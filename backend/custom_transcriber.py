@@ -11,6 +11,11 @@ import torch
 import torch.nn as nn
 
 
+DEFAULT_HF_REPO_ID = "carolinahenao01/WidiAI"
+DEFAULT_HF_CHECKPOINT_FILE = "checkpoint_50000.pt"
+DEFAULT_HF_REVISION = "main"
+
+
 class AcousticModel(nn.Module):
     def __init__(self, params: dict):
         super().__init__()
@@ -209,6 +214,10 @@ CONFIG_INFERENCE = {
     "combined_lstm_units": 128,
     "pitch_offset": 21,
     "checkpoint_path": os.getenv("OWN_MODEL_CHECKPOINT", "./checkpoint_50000.pt"),
+    "checkpoint_repo_id": os.getenv("OWN_MODEL_CHECKPOINT_REPO", DEFAULT_HF_REPO_ID),
+    "checkpoint_filename": os.getenv("OWN_MODEL_CHECKPOINT_FILE", DEFAULT_HF_CHECKPOINT_FILE),
+    "checkpoint_revision": os.getenv("OWN_MODEL_CHECKPOINT_REVISION", DEFAULT_HF_REVISION),
+    "checkpoint_cache_dir": os.getenv("OWN_MODEL_CHECKPOINT_CACHE_DIR"),
     "sample_rate": 16000,
     "window_size": 20.0,
     "mel_n_fft": 2048,
@@ -225,18 +234,72 @@ def get_device() -> str:
     return "cpu"
 
 
+def resolve_checkpoint_path(config: dict) -> Path:
+    checkpoint_path_value = config.get("checkpoint_path")
+    checkpoint_path_raw = str(checkpoint_path_value).strip() if checkpoint_path_value is not None else ""
+    local_candidate = Path(checkpoint_path_raw).expanduser() if checkpoint_path_raw else None
+
+    if local_candidate and local_candidate.exists():
+        return local_candidate
+
+    repo_value = config.get("checkpoint_repo_id")
+    file_value = config.get("checkpoint_filename")
+    revision_value = config.get("checkpoint_revision", DEFAULT_HF_REVISION)
+    cache_dir_value = config.get("checkpoint_cache_dir")
+
+    repo_id = str(repo_value).strip() if repo_value is not None else ""
+    filename = str(file_value).strip() if file_value is not None else ""
+    revision = str(revision_value).strip() if revision_value is not None else DEFAULT_HF_REVISION
+    revision = revision or DEFAULT_HF_REVISION
+    cache_dir = (
+        str(cache_dir_value).strip()
+        if cache_dir_value not in (None, "")
+        else None
+    ) or None
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+
+    if not repo_id or not filename:
+        missing = local_candidate.resolve() if local_candidate else checkpoint_path_raw or "<unset>"
+        raise FileNotFoundError(
+            "Checkpoint not found and Hugging Face fallback is not configured. "
+            f"Missing local checkpoint: {missing}"
+        )
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to download the checkpoint automatically. "
+            "Install dependencies with: pip install -r requirements.txt"
+        ) from exc
+
+    try:
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            revision=revision,
+            repo_type="model",
+            cache_dir=cache_dir,
+            token=token,
+        )
+        return Path(downloaded)
+    except Exception as exc:
+        missing = local_candidate.resolve() if local_candidate else checkpoint_path_raw or "<unset>"
+        raise FileNotFoundError(
+            "Checkpoint could not be resolved. "
+            f"Local path checked: {missing}. "
+            f"Hugging Face source: {repo_id}/{filename}@{revision}. "
+            f"Original error: {exc}"
+        ) from exc
+
+
 def load_own_model(config: dict = CONFIG_INFERENCE) -> TranscriptionModel:
     global _MODEL
 
     if _MODEL is not None:
         return _MODEL
 
-    checkpoint_path = Path(config["checkpoint_path"])
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path.resolve()}"
-        )
+    checkpoint_path = resolve_checkpoint_path(config)
 
     device = get_device()
 
