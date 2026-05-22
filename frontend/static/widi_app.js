@@ -395,32 +395,87 @@ function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
   const freq = midiToFrequency(noteNumber);
   const velocity = Math.min(1, Math.max(0.08, velocityNorm));
 
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  const filter = ctx.createBiquadFilter();
-  osc.type = 'triangle';
-  osc.frequency.setValueAtTime(freq, now);
-  filter.type = 'lowpass';
-  filter.frequency.setValueAtTime(Math.min(9000, freq * 6), now);
-  filter.Q.setValueAtTime(0.35, now);
+  const noteDuration = Math.max(0.05, durationSec);
+  const release = Math.min(2.4, Math.max(0.55, noteDuration * 0.55));
+  const stopAt = now + noteDuration + release + 0.08;
+  const brightness = Math.max(0.45, Math.min(1, (noteNumber - 28) / 72));
+  const bodyPeak = Math.min(0.34, 0.06 + velocity * 0.22);
 
-  const peak = Math.min(0.48, 0.1 + velocity * 0.28);
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(peak, now + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + Math.max(0.03, durationSec) + 0.14);
+  const bodyFilter = ctx.createBiquadFilter();
+  bodyFilter.type = 'lowpass';
+  bodyFilter.frequency.setValueAtTime(Math.min(8200, 1700 + freq * (5.2 + brightness * 1.4)), now);
+  bodyFilter.Q.setValueAtTime(0.7, now);
 
-  osc.connect(filter);
-  filter.connect(gain);
-  gain.connect(_nativeMasterGain);
+  const bodyGain = ctx.createGain();
+  bodyGain.gain.setValueAtTime(0.0001, now);
+  bodyGain.gain.exponentialRampToValueAtTime(bodyPeak, now + 0.012);
+  bodyGain.gain.exponentialRampToValueAtTime(bodyPeak * 0.58, now + 0.16);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
 
-  osc.start(now);
-  osc.stop(now + Math.max(0.03, durationSec) + 0.16);
-  _nativeNodes.add(osc);
-  osc.onended = () => {
-    try { osc.disconnect(); } catch (_) {}
-    try { filter.disconnect(); } catch (_) {}
-    try { gain.disconnect(); } catch (_) {}
-    _nativeNodes.delete(osc);
+  const partials = [
+    { ratio: 1.000, level: 1.00, detune: 0 },
+    { ratio: 2.010, level: 0.32, detune: -3 },
+    { ratio: 3.030, level: 0.18, detune: 4 },
+    { ratio: 4.080, level: 0.09, detune: -6 },
+  ];
+
+  let endedPartials = 0;
+  const oscs = partials.map(partial => {
+    const osc = ctx.createOscillator();
+    const partialGain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq * partial.ratio, now);
+    osc.detune.setValueAtTime(partial.detune, now);
+    partialGain.gain.setValueAtTime(partial.level, now);
+    osc.connect(partialGain);
+    partialGain.connect(bodyFilter);
+    osc.start(now);
+    osc.stop(stopAt);
+    _nativeNodes.add(osc);
+    osc.onended = () => {
+      try { osc.disconnect(); } catch (_) {}
+      try { partialGain.disconnect(); } catch (_) {}
+      _nativeNodes.delete(osc);
+      endedPartials += 1;
+      if (endedPartials >= partials.length) {
+        try { bodyFilter.disconnect(); } catch (_) {}
+        try { bodyGain.disconnect(); } catch (_) {}
+      }
+    };
+    return osc;
+  });
+
+  const hammerBuffer = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * 0.028)), ctx.sampleRate);
+  const hammerData = hammerBuffer.getChannelData(0);
+  for (let i = 0; i < hammerData.length; i += 1) {
+    const t = i / hammerData.length;
+    hammerData[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 4);
+  }
+
+  const hammer = ctx.createBufferSource();
+  const hammerFilter = ctx.createBiquadFilter();
+  const hammerGain = ctx.createGain();
+  hammer.buffer = hammerBuffer;
+  hammerFilter.type = 'bandpass';
+  hammerFilter.frequency.setValueAtTime(Math.min(7200, 1800 + freq * 5), now);
+  hammerFilter.Q.setValueAtTime(1.2, now);
+  hammerGain.gain.setValueAtTime(0.045 * velocity, now);
+  hammerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
+
+  bodyFilter.connect(bodyGain);
+  bodyGain.connect(_nativeMasterGain);
+  hammer.connect(hammerFilter);
+  hammerFilter.connect(hammerGain);
+  hammerGain.connect(_nativeMasterGain);
+
+  hammer.start(now);
+  hammer.stop(now + 0.05);
+  _nativeNodes.add(hammer);
+  hammer.onended = () => {
+    try { hammer.disconnect(); } catch (_) {}
+    try { hammerFilter.disconnect(); } catch (_) {}
+    try { hammerGain.disconnect(); } catch (_) {}
+    _nativeNodes.delete(hammer);
   };
 }
 
@@ -1463,12 +1518,12 @@ function renderDashboard(content) {
             </div>` : ''}
           <div id="proc-wrap" style="display:${state.stage==='processing'?'block':'none'};margin-top:12px;">
             <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-              <span style="font-size:11px;color:#a78bfa;" id="proc-lbl">Processing…</span>
+              <span style="font-size:11px;color:#a78bfa;" id="proc-lbl">${_getProcessingLabel(state.progress)}</span>
               <span style="font-size:11px;color:#6b7280;" id="proc-pct">${Math.round(state.progress)}%</span>
             </div>
             <div class="w-progress-bar"><div class="w-progress-fill" id="proc-bar" style="width:${state.progress}%"></div></div>
             <div style="display:flex;gap:6px;margin-top:8px;">
-              ${['Onset detection','Frame analysis','MIDI mapping'].map((s,i)=>`<div class="w-step" style="background:${state.progress>(i+1)*30?'rgba(16,185,129,0.12)':'rgba(255,255,255,0.04)'};border:1px solid ${state.progress>(i+1)*30?'rgba(16,185,129,0.25)':'rgba(255,255,255,0.06)'};" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:${state.progress>(i+1)*30?'#10b981':'#374151'};"></div><span style="font-size:9px;color:${state.progress>(i+1)*30?'#6ee7b7':'#4b5563'};">${s}</span></div>`).join('')}
+              ${['Upload','Analysis','MIDI mapping'].map((s,i)=>{const ok=state.progress>=[18,48,76][i];return `<div class="w-step" style="background:${ok?'rgba(16,185,129,0.12)':'rgba(255,255,255,0.04)'};border:1px solid ${ok?'rgba(16,185,129,0.25)':'rgba(255,255,255,0.06)'};" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:${ok?'#10b981':'#374151'};"></div><span style="font-size:9px;color:${ok?'#6ee7b7':'#4b5563'};">${s}</span></div>`}).join('')}
             </div>
           </div>
           ${state.stage==='ready'?`<div class="w-file-badge w-fade-in" style="margin-top:12px;">${ICON.checkCircle(13,'#10b981')} <span style="font-size:11px;color:#6ee7b7;">MIDI conversion complete!</span></div>`:''}
@@ -1482,7 +1537,6 @@ function renderDashboard(content) {
             <button class="w-midi-play" id="midi-play" ${state.stage!=='ready'?'disabled':''} style="background:${state.stage==='ready'?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.05)'};box-shadow:${state.stage==='ready'?`0 0 ${state.midiPlaying?30:15}px rgba(139,92,246,${state.midiPlaying?0.7:0.4})`:'none'};">
               ${state.midiPlaying?ICON.pause(20,'white'):ICON.play(20,'white')}
             </button>
-            <button class="w-ctrl-btn accent" id="midi-dl" ${state.stage!=='ready'?'disabled':''}>${ICON.download(14,'#93c5fd')}</button>
             <button class="w-ctrl-btn" id="demo-midi-btn" title="Load demo MIDI" style="width:auto;padding:0 10px;border-radius:12px;display:flex;gap:6px;">
               ${ICON.music2(14,'#9ca3af')}
               <span style="font-size:11px;color:#9ca3af;">Demo</span>
@@ -1590,7 +1644,6 @@ function renderDashboard(content) {
   content.querySelector('#convert-btn').addEventListener('click', _handleConvert.bind(null, content));
   content.querySelector('#midi-play').addEventListener('click', () => _midiPlayPause(content));
   content.querySelector('#midi-stop').addEventListener('click', () => _midiStop(content));
-  content.querySelector('#midi-dl').addEventListener('click', _downloadMidi);
   content.querySelector('#demo-midi-btn').addEventListener('click', () => _loadDemoMidi(content));
   content.querySelector('#export-btn').addEventListener('click', _downloadMidi);
   content.querySelector('#note-edit-toggle')?.addEventListener('click', () => {
@@ -1900,11 +1953,15 @@ async function _loadDemoMidi(content) {
 function _updateProcessingUI(content) {
   const bar = content.querySelector('#proc-bar');
   const pct = content.querySelector('#proc-pct');
-  if (bar) bar.style.width = state.progress + '%';
-  if (pct) pct.textContent = Math.round(state.progress) + '%';
+  const label = content.querySelector('#proc-lbl');
+  const progress = Math.max(0, Math.min(99, state.progress));
+  if (bar) bar.style.width = progress + '%';
+  if (pct) pct.textContent = Math.round(progress) + '%';
+  if (label) label.textContent = _getProcessingLabel(progress);
 
   content.querySelectorAll('[data-step]').forEach((el, i) => {
-    const ok = state.progress > (i + 1) * 30;
+    const thresholds = [18, 48, 76];
+    const ok = progress >= thresholds[i];
     el.style.background = ok ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.04)';
     el.style.border = `1px solid ${ok ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}`;
     const dot = el.querySelector('div');
@@ -1912,6 +1969,21 @@ function _updateProcessingUI(content) {
     if (dot) dot.style.background = ok ? '#10b981' : '#374151';
     if (sp) sp.style.color = ok ? '#6ee7b7' : '#4b5563';
   });
+}
+
+function _getProcessingLabel(progress) {
+  if (progress < 18) return 'Uploading audio...';
+  if (progress < 48) return 'Detecting piano onsets...';
+  if (progress < 76) return 'Analyzing notes and timing...';
+  if (progress < 96) return 'Mapping notes to MIDI...';
+  return 'Finalizing MIDI...';
+}
+
+function _getEstimatedProcessingMs(audioFile) {
+  const sizeMb = audioFile?.size ? audioFile.size / (1024 * 1024) : 2;
+  const modelMultiplier = state.selectedModel === 'onsets_and_frames' ? 1.45 : 1;
+  const estimated = 9000 + (sizeMb * 4200 * modelMultiplier);
+  return Math.max(14000, Math.min(90000, estimated));
 }
 
 async function _handleRecord() {
@@ -2054,12 +2126,20 @@ async function _handleConvert(content) {
   clearStatusMessage();
   renderDashboard(content);
 
-  let p = 3;
+  if (_progressTimer) {
+    clearInterval(_progressTimer);
+    _progressTimer = null;
+  }
+
+  const startedAt = Date.now();
+  const estimatedMs = _getEstimatedProcessingMs(audioFile);
   _progressTimer = setInterval(() => {
-    p += Math.random() * 4 + 1.5;
-    state.progress = Math.min(90, p);
+    const elapsed = Date.now() - startedAt;
+    const eased = 1 - Math.exp(-elapsed / estimatedMs);
+    const target = Math.min(98, 4 + eased * 94);
+    state.progress = Math.max(state.progress, target);
     _updateProcessingUI(content);
-  }, 180);
+  }, 350);
 
   try {
     const formData = new FormData();
@@ -2082,6 +2162,9 @@ async function _handleConvert(content) {
       }
       throw new Error(errorMessage);
     }
+
+    state.progress = Math.max(state.progress, 99);
+    _updateProcessingUI(content);
 
     const midiBlob = await response.blob();
 

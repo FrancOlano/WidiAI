@@ -388,6 +388,7 @@ class PianoRoll {
     this.currentTime = 0;
     this.isPlaying = false;
     this.pressedKeys = new Set();
+    this._prevActive = new Set();
     this.audioCtx = null;
     this.activeGains = new Map();
     this.animId = 0;
@@ -490,6 +491,13 @@ class PianoRoll {
     c.addEventListener('touchstart', this._h.ts, { passive: false });
     c.addEventListener('touchmove', this._h.tm, { passive: false });
     c.addEventListener('touchend', this._h.te, { passive: false });
+
+    this._visHandler = () => {
+      if (document.visibilityState === 'visible' && this.audioCtx) {
+        this.audioCtx.resume();
+      }
+    };
+    document.addEventListener('visibilitychange', this._visHandler);
   }
 
   _setup() {
@@ -504,16 +512,41 @@ class PianoRoll {
     const ctx = this.canvas.getContext('2d');
     ctx.scale(dpr, dpr);
     this.keys = this._buildKeys(W);
+    this._visHandler = () => {
+      if (document.visibilityState === 'visible') {
+        this.lastTs = null;
+        if (this.audioCtx) this.audioCtx.resume();
+      }
+    };
+    document.addEventListener('visibilitychange', this._visHandler);
+  
     const loop = ts => {
       if (this.lastTs !== null) {
         const d = (ts - this.lastTs) / 1000;
         this.internalTime = this.isPlaying ? this.currentTime : (this.internalTime + d * 0.22) % (48);
       }
       this.lastTs = ts;
+      if (this.isPlaying) {
+        const nowActive = new Set();
+        this.notes.forEach(n => {
+          if (this.currentTime >= n.startTime && this.currentTime < n.startTime + n.duration) {
+            nowActive.add(n.note);
+          }
+        });
+        nowActive.forEach(m => {
+          if (!this._prevActive.has(m)) this._playNote(m);
+        });
+        this._prevActive.forEach(m => {
+          if (!nowActive.has(m)) this._stopNote(m);
+        });
+        this._prevActive = nowActive;
+      } else if (this._prevActive.size > 0) {
+        this._prevActive.forEach(m => this._stopNote(m));
+        this._prevActive = new Set();
+      }
       this._draw(ctx, W, H, this.internalTime);
       this.animId = requestAnimationFrame(loop);
     };
-    this.animId = requestAnimationFrame(loop);
   }
 
   _noteColor(midi) {
@@ -676,12 +709,23 @@ class PianoRoll {
     });
   }
 
-  setTime(t) { this.currentTime = t; }
-  setPlaying(p) { this.isPlaying = p; }
+  setTime(t) { 
+    this.currentTime = t;
+    this._prevActive.forEach(m => this._stopNote(m)); 
+    this._prevActive = new Set();
+   }
+  setPlaying(p) { 
+    this.isPlaying = p;
+    if (!p) {
+      this._prevActive.forEach(m => this._stopNote(m)); // ← clear on stop
+      this._prevActive = new Set();
+    } 
+  }
 
   destroy() {
     cancelAnimationFrame(this.animId);
     this._ro.disconnect();
+    document.removeEventListener('visibilitychange', this._visHandler);
     const c = this.canvas;
     c.removeEventListener('mousedown', this._h.md);
     c.removeEventListener('mousemove', this._h.mm);
@@ -693,6 +737,7 @@ class PianoRoll {
     this.pressedKeys.forEach(m => this._stopNote(m));
     if (this.audioCtx) this.audioCtx.close();
     c.remove();
+    document.removeEventListener('visibilitychange', this._visHandler);
   }
 }
 
@@ -1355,11 +1400,43 @@ export function init(container) {
 
   renderPage(content);
 
-  // Cleanup on unmount
-  return () => {
+  // Revoke blob URL and reset upload state on tab close
+  const _cleanup = () => {
     destroyInstances();
     if (_recTimer) clearTimeout(_recTimer);
     if (_progressTimer) clearInterval(_progressTimer);
-    if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
+    if (_audioUrlRef) { URL.revokeObjectURL(_audioUrlRef); _audioUrlRef = null; }
+    state.audioUrl = null;
+    state.fileName = null;
+    state.stage = 'idle';
+    state.midiPlaying = false;
+    state.midiTime = 0;
+    state.progress = 0;
+  };
+
+  window.addEventListener('pagehide', _cleanup);
+  window.addEventListener('beforeunload', _cleanup);
+  // Reset upload state when page is restored from bfcache
+  const _resetOnRestore = (e) => {
+    if (e.persisted) {
+      state.fileName = null;
+      state.audioUrl = null;
+      state.stage = 'idle';
+      state.midiPlaying = false;
+      state.midiTime = 0;
+      state.progress = 0;
+      state.isRecording = false;
+      if (_audioUrlRef) { URL.revokeObjectURL(_audioUrlRef); _audioUrlRef = null; }
+      const c = document.getElementById('w-content');
+      if (c) renderDashboard(c);
+    }
+  };
+  window.addEventListener('pageshow', _resetOnRestore);
+
+  return () => {
+    window.removeEventListener('pagehide', _cleanup);
+    window.removeEventListener('beforeunload', _cleanup);
+    window.removeEventListener('pageshow', _resetOnRestore);
+    _cleanup();
   };
 }
