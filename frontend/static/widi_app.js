@@ -108,6 +108,9 @@ const AUDIO_DB = {
 const MODEL_IDS = ['transkun', 'onsets_and_frames'];
 const MAX_RECORDING_MS = 5 * 60 * 1000;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const SF2_SOUND_FONT_URL = '/static/soundfonts/full-grand-piano.sf2';
+const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
+const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
 
 const getConfiguredApiUrl = () => {
   const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
@@ -284,6 +287,8 @@ let _nativeAudioCtx = null, _nativeMasterGain = null;
 let _nativeTimers = [], _nativeNodes = new Set();
 let _nativeStartPerf = 0, _nativeStartOffset = 0;
 let _audioUnlockBound = false;
+let _sf2Synth = null, _sf2AudioNode = null;
+let _sf2InitPromise = null, _sf2UnavailableReason = '';
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
@@ -348,6 +353,48 @@ function bindAudioUnlock() {
   document.addEventListener('keydown', unlock, { once: true, capture: true });
 }
 
+function disposeSf2Synth() {
+  if (_sf2Synth) {
+    try { _sf2Synth.midiAllSoundsOff(); } catch (_) {}
+    try { _sf2Synth.close(); } catch (_) {}
+  }
+  if (_sf2AudioNode) {
+    try { _sf2AudioNode.disconnect(); } catch (_) {}
+  }
+  _sf2Synth = null;
+  _sf2AudioNode = null;
+  _sf2InitPromise = null;
+}
+
+function loadExternalScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const existingByData = document.querySelector(`script[data-widi-src="${src}"]`);
+    const existingBySrc = Array.from(document.scripts).find(script => script.src === src);
+    const existing = existingByData || existingBySrc;
+
+    if (existing) {
+      if (existing.dataset.widiLoaded === 'true' || existing.readyState === 'complete') {
+        resolve();
+        return;
+      }
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error(`Failed to load script: ${src}`)), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.widiSrc = src;
+    script.addEventListener('load', () => {
+      script.dataset.widiLoaded = 'true';
+      resolve();
+    }, { once: true });
+    script.addEventListener('error', () => reject(new Error(`Failed to load script: ${src}`)), { once: true });
+    document.head.appendChild(script);
+  });
+}
+
 async function ensureNativeAudioReady() {
   let ctx = getNativeAudioContext();
   if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
@@ -357,6 +404,7 @@ async function ensureNativeAudioReady() {
   // Safari can keep a context in a bad state after output device changes.
   // Recreate once if resume did not move it to running.
   if (ctx.state !== 'running') {
+    disposeSf2Synth();
     try { await ctx.close(); } catch (_) {}
     _nativeAudioCtx = null;
     _nativeMasterGain = null;
@@ -367,6 +415,48 @@ async function ensureNativeAudioReady() {
   }
 
   return ctx;
+}
+
+async function ensureSf2SynthReady() {
+  if (_sf2UnavailableReason) throw new Error(_sf2UnavailableReason);
+  if (_sf2Synth) return _sf2Synth;
+  if (_sf2InitPromise) return _sf2InitPromise;
+
+  _sf2InitPromise = (async () => {
+    await ensureNativeAudioReady();
+    await loadExternalScriptOnce(SF2_FLUID_SCRIPT_URL);
+    await loadExternalScriptOnce(SF2_SYNTH_SCRIPT_URL);
+
+    if (!window.JSSynth || typeof window.JSSynth.waitForReady !== 'function') {
+      throw new Error('SF2 runtime did not load correctly.');
+    }
+
+    await window.JSSynth.waitForReady();
+    const synth = new window.JSSynth.Synthesizer();
+    synth.init(_nativeAudioCtx.sampleRate);
+    const node = synth.createAudioNode(_nativeAudioCtx, 4096);
+    node.connect(_nativeMasterGain || _nativeAudioCtx.destination);
+
+    const response = await fetch(SF2_SOUND_FONT_URL);
+    if (!response.ok) {
+      throw new Error(`Failed to load ${SF2_SOUND_FONT_URL} (${response.status})`);
+    }
+    const sf2Buffer = await response.arrayBuffer();
+    await synth.loadSFont(sf2Buffer);
+    synth.midiProgramChange(0, 0);
+
+    _sf2Synth = synth;
+    _sf2AudioNode = node;
+    return synth;
+  })();
+
+  try {
+    return await _sf2InitPromise;
+  } catch (error) {
+    disposeSf2Synth();
+    _sf2UnavailableReason = `SF2 playback unavailable (${error.message}).`;
+    throw new Error(_sf2UnavailableReason);
+  }
 }
 
 async function playPreviewNote(noteNumber, durationSec = 0.5, velocityNorm = 0.9) {
@@ -381,6 +471,10 @@ function midiToFrequency(midiNote) {
 function stopNativePlayback() {
   _nativeTimers.forEach(id => clearTimeout(id));
   _nativeTimers = [];
+  if (_sf2Synth) {
+    try { _sf2Synth.midiAllNotesOff(); } catch (_) {}
+    try { _sf2Synth.midiAllSoundsOff(); } catch (_) {}
+  }
   _nativeNodes.forEach(node => {
     try { node.stop(); } catch (_) {}
     try { node.disconnect(); } catch (_) {}
@@ -389,6 +483,19 @@ function stopNativePlayback() {
 }
 
 function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
+  if (_sf2Synth) {
+    const midiNote = Math.max(0, Math.min(127, Math.round(Number(noteNumber) || 0)));
+    const velocity = Math.max(1, Math.min(127, Math.round((Math.min(1, Math.max(0.02, velocityNorm || 0.8))) * 127)));
+    const noteDurationMs = Math.max(25, Math.round(Math.max(0.03, Number(durationSec) || 0.12) * 1000));
+    _sf2Synth.midiNoteOn(0, midiNote, velocity);
+    const noteOffTimer = setTimeout(() => {
+      if (!_sf2Synth) return;
+      try { _sf2Synth.midiNoteOff(0, midiNote); } catch (_) {}
+    }, noteDurationMs);
+    _nativeTimers.push(noteOffTimer);
+    return;
+  }
+
   if (!_nativeAudioCtx || !_nativeMasterGain) return;
   const ctx = _nativeAudioCtx;
   const now = ctx.currentTime;
@@ -1707,7 +1814,7 @@ function _midiTick(content) {
   _midiRaf = requestAnimationFrame(() => _midiTick(content));
 }
 
-function _midiPlayPause(content) {
+async function _midiPlayPause(content) {
   if (state.stage !== 'ready') return;
   if (!state.midiNotes.length) {
     setStatusMessage('The loaded MIDI contains no note events to play.', 'error');
@@ -1727,14 +1834,22 @@ function _midiPlayPause(content) {
     return;
   }
 
-  // Create context synchronously within the click handler
   let ctx;
   try {
-    ctx = getNativeAudioContext();
+    ctx = await ensureNativeAudioReady();
   } catch (error) {
     setStatusMessage(`Audio error: ${error.message}`, 'error');
     renderDashboard(content);
     return;
+  }
+
+  if (!_sf2Synth && !_sf2UnavailableReason) {
+    try {
+      await ensureSf2SynthReady();
+      setStatusMessage('Playback using Full Grand Piano.sf2.', 'success');
+    } catch (error) {
+      setStatusMessage(`${error.message} Using built-in synth instead.`, 'error');
+    }
   }
 
   const startPlayback = () => {
@@ -1753,12 +1868,13 @@ function _midiPlayPause(content) {
   if (ctx.state === 'running') {
     startPlayback();
   } else {
-    ctx.resume()
-      .then(startPlayback)
-      .catch(error => {
-        setStatusMessage(`Playback error: ${error.message}`, 'error');
-        renderDashboard(content);
-      });
+    try {
+      await ctx.resume();
+      startPlayback();
+    } catch (error) {
+      setStatusMessage(`Playback error: ${error.message}`, 'error');
+      renderDashboard(content);
+    }
   }
 }
 
