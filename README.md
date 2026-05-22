@@ -154,7 +154,12 @@ python scripts/generate_frontend_env.py
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OWN_MODEL_CHECKPOINT` | Only for `onsets_and_frames` | `./checkpoint_50000.pt` | Path to custom model checkpoint |
+| `OWN_MODEL_CHECKPOINT` | No | `./checkpoint_50000.pt` | Local checkpoint path (if present, it is used first). |
+| `OWN_MODEL_CHECKPOINT_REPO` | No | `carolinahenao01/WidiAI` | Hugging Face repo id used when local checkpoint is missing. |
+| `OWN_MODEL_CHECKPOINT_FILE` | No | `checkpoint_50000.pt` | Checkpoint filename inside the HF repo. |
+| `OWN_MODEL_CHECKPOINT_REVISION` | No | `main` | HF branch/tag/commit to download from. |
+| `OWN_MODEL_CHECKPOINT_CACHE_DIR` | No | HF default cache | Optional custom cache directory for downloaded checkpoint files. |
+| `HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` | No | unset | Required only if the HF repo is private. |
 
 ### Frontend Runtime Configuration
 
@@ -166,7 +171,7 @@ Create `.env.frontend` and generate `frontend/static/env.js` with `scripts/gener
 
 Notes:
 
-- If `OWN_MODEL_CHECKPOINT` is missing and `onsets_and_frames` is selected, transcription fails with `Checkpoint not found`.
+- If `OWN_MODEL_CHECKPOINT` is missing, backend automatically downloads the checkpoint from Hugging Face and reuses the local cache on next runs.
 - `transkun` runs without this variable.
 
 ## Model Setup
@@ -177,12 +182,23 @@ No additional setup is required when `transkun` is installed in the active envir
 
 ### Option B: `onsets_and_frames` (custom model)
 
-1. Download `checkpoint_50000.pt`:
-   - https://drive.google.com/file/d/1ly9Ux77OxtdZW71cZnnXt1Yz6H4Pcj-E/view?usp=sharing
-2. Place it at project root, or set:
+No manual checkpoint download is required by default.
+
+By default, backend resolves:
+
+- Repo: `carolinahenao01/WidiAI`
+- File: `checkpoint_50000.pt`
+- Revision: `main`
+
+Optional overrides:
 
 ```bash
 export OWN_MODEL_CHECKPOINT=/absolute/path/to/checkpoint_50000.pt
+export OWN_MODEL_CHECKPOINT_REPO=carolinahenao01/WidiAI
+export OWN_MODEL_CHECKPOINT_FILE=checkpoint_50000.pt
+export OWN_MODEL_CHECKPOINT_REVISION=main
+export OWN_MODEL_CHECKPOINT_CACHE_DIR=/absolute/path/to/cache
+export HF_TOKEN=hf_xxx   # only if repo is private
 ```
 
 ## API Reference

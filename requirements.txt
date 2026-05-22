@@ -7,3 +7,4 @@ librosa
 numpy
 pretty_midi
 transkun
+huggingface_hub
