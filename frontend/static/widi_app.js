@@ -276,6 +276,8 @@ const state = {
   noteEditMode: false,
   noteEditorView: 'roll',
   noteGuideOpen: storedGuideOpen,
+  noteHistoryOpen: false,
+  scoreReadableMode: false,
   rollZoomX: 1,
   rollZoomY: 1,
   scoreZoomX: 1,
@@ -312,6 +314,7 @@ let _sf2InitPromise = null, _sf2UnavailableReason = '';
 let _notesUndoStack = [];
 let _notesRedoStack = [];
 let _lastCommittedNotesSnapshot = null;
+let _editHistoryEntries = [];
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
@@ -361,17 +364,33 @@ function _replaceMidiNotesInPlace(nextNotes) {
   state.midiNotes.splice(0, state.midiNotes.length, ...next);
 }
 
+function _recordEditHistory(action, type = 'edit') {
+  const label = String(action || 'Edit notes').trim();
+  const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  _editHistoryEntries.unshift({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    action: label,
+    type,
+    stamp,
+  });
+  if (_editHistoryEntries.length > 120) _editHistoryEntries.pop();
+}
+
 function _resetEditHistory() {
   _notesUndoStack = [];
   _notesRedoStack = [];
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _editHistoryEntries = [];
 }
 
-function _pushUndoSnapshotIfNeeded() {
+function _pushUndoSnapshotIfNeeded(action = 'Edit notes') {
   const current = _cloneNotes(state.midiNotes);
   if (_lastCommittedNotesSnapshot && _notesEqual(current, _lastCommittedNotesSnapshot)) return false;
   if (_lastCommittedNotesSnapshot) {
-    _notesUndoStack.push(_cloneNotes(_lastCommittedNotesSnapshot));
+    _notesUndoStack.push({
+      notes: _cloneNotes(_lastCommittedNotesSnapshot),
+      action: String(action || 'Edit notes').trim(),
+    });
     if (_notesUndoStack.length > 120) _notesUndoStack.shift();
   }
   _notesRedoStack = [];
@@ -379,51 +398,65 @@ function _pushUndoSnapshotIfNeeded() {
   return true;
 }
 
-function _applyEditorNotesCommit(content, notes) {
+function _applyEditorNotesCommit(content, notes, action = 'Edit notes') {
   if (state.stage !== 'ready') return false;
   _replaceMidiNotesInPlace(notes);
-  const changed = _pushUndoSnapshotIfNeeded();
+  const changed = _pushUndoSnapshotIfNeeded(action);
   if (!changed) {
     _updateSeek(content);
     _syncEditToolbar(content);
     return false;
   }
+  _recordEditHistory(action, 'edit');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) {
     console.warn('MIDI notes changed, but MIDI export refresh failed.');
   }
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
 }
 
 function _undoNoteEdit(content) {
   if (state.stage !== 'ready' || state.midiPlaying || !_notesUndoStack.length) return false;
-  const snapshot = _notesUndoStack.pop();
-  _notesRedoStack.push(_cloneNotes(state.midiNotes));
+  const snapshotEntry = _notesUndoStack.pop();
+  const action = snapshotEntry?.action || 'Edit notes';
+  _notesRedoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action,
+  });
   if (_notesRedoStack.length > 120) _notesRedoStack.shift();
-  _replaceMidiNotesInPlace(snapshot);
+  _replaceMidiNotesInPlace(snapshotEntry?.notes || []);
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Undo · ${action}`, 'undo');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) console.warn('Undo applied, but MIDI export refresh failed.');
   if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
 }
 
 function _redoNoteEdit(content) {
   if (state.stage !== 'ready' || state.midiPlaying || !_notesRedoStack.length) return false;
-  const snapshot = _notesRedoStack.pop();
-  _notesUndoStack.push(_cloneNotes(state.midiNotes));
+  const snapshotEntry = _notesRedoStack.pop();
+  const action = snapshotEntry?.action || 'Edit notes';
+  _notesUndoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action,
+  });
   if (_notesUndoStack.length > 120) _notesUndoStack.shift();
-  _replaceMidiNotesInPlace(snapshot);
+  _replaceMidiNotesInPlace(snapshotEntry?.notes || []);
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Redo · ${action}`, 'redo');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) console.warn('Redo applied, but MIDI export refresh failed.');
   if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
 }
 
@@ -440,6 +473,15 @@ function _syncEditToolbar(content) {
     guideToggle.textContent = state.noteGuideOpen ? 'Hide Guide' : 'Show Guide';
     guideToggle.classList.toggle('active', state.noteGuideOpen);
   }
+  const historyToggle = content.querySelector('#history-toggle');
+  if (historyToggle) {
+    historyToggle.classList.toggle('active', state.noteHistoryOpen);
+    historyToggle.textContent = state.noteHistoryOpen ? 'Hide History' : 'History';
+  }
+  const readableToggle = content.querySelector('#score-readable-toggle');
+  if (readableToggle) {
+    readableToggle.classList.toggle('active', state.scoreReadableMode);
+  }
 
   const activeZoomX = state.noteEditorView === 'score' ? state.scoreZoomX : state.rollZoomX;
   const activeZoomY = state.noteEditorView === 'score' ? state.scoreZoomY : state.rollZoomY;
@@ -451,6 +493,8 @@ function _syncEditToolbar(content) {
     const button = content.querySelector(selector);
     if (button) button.disabled = playbackLocked;
   });
+
+  if (state.noteHistoryOpen) _syncHistoryOverlay(content);
 }
 
 function resetMidiData() {
@@ -469,6 +513,8 @@ function resetMidiData() {
   state.midiTime = 0;
   state.noteEditMode = false;
   state.noteEditorView = 'roll';
+  state.noteHistoryOpen = false;
+  state.scoreReadableMode = false;
   state.rollZoomX = 1;
   state.rollZoomY = 1;
   state.scoreZoomX = 1;
@@ -987,6 +1033,10 @@ function injectCSS(container) {
 .w-note-edit-btn:hover:not(:disabled){background:rgba(139,92,246,0.14);border-color:rgba(139,92,246,0.34);color:#c4b5fd;}
 .w-note-edit-btn.active{background:rgba(139,92,246,0.2);border-color:rgba(139,92,246,0.44);color:#ddd6fe;box-shadow:0 0 12px rgba(139,92,246,0.22);}
 .w-note-edit-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-score-readable-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
+.w-score-readable-btn:hover:not(:disabled){background:rgba(16,185,129,0.14);border-color:rgba(16,185,129,0.34);color:#86efac;}
+.w-score-readable-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-score-readable-btn.active{background:rgba(16,185,129,0.2);border-color:rgba(16,185,129,0.42);color:#bbf7d0;box-shadow:0 0 12px rgba(16,185,129,0.18);}
 .w-note-guide-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
 .w-note-guide-btn:hover:not(:disabled){background:rgba(59,130,246,0.14);border-color:rgba(59,130,246,0.34);color:#bfdbfe;}
 .w-note-guide-btn:disabled{opacity:0.45;cursor:not-allowed;}
@@ -1013,6 +1063,17 @@ function injectCSS(container) {
 .w-guide-tooltip-title{font-size:10px;font-weight:800;color:#ddd6fe;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:5px;}
 .w-guide-tooltip p{font-size:10px;color:#cbd5e1;line-height:1.35;margin-top:3px;}
 .w-guide-tooltip strong{color:#f5f3ff;font-weight:700;}
+.w-edit-history-panel{position:absolute;top:94px;right:12px;z-index:34;width:min(360px,42vw);max-height:min(58vh,420px);display:flex;flex-direction:column;border-radius:12px;border:1px solid rgba(59,130,246,0.34);background:linear-gradient(170deg,rgba(9,12,24,0.97),rgba(10,10,18,0.96));box-shadow:0 12px 28px rgba(0,0,0,0.45);}
+.w-edit-history-head{display:flex;align-items:center;justify-content:space-between;padding:10px 11px;border-bottom:1px solid rgba(255,255,255,0.08);}
+.w-edit-history-head p{font-size:10px;color:#bfdbfe;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;}
+.w-edit-history-meta{font-size:9px;color:#9ca3af;}
+.w-edit-history-list{overflow:auto;padding:7px 8px 8px;display:flex;flex-direction:column;gap:6px;}
+.w-edit-history-item{border-radius:8px;padding:7px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
+.w-edit-history-item-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.w-edit-history-item p{font-size:10px;color:#e5e7eb;line-height:1.3;}
+.w-edit-history-item span{font-size:9px;color:#9ca3af;}
+.w-edit-history-type{font-size:8px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.06em;padding:1px 5px;border-radius:999px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.15);}
+.w-edit-history-empty{padding:18px 10px 20px;text-align:center;font-size:10px;color:#6b7280;}
 .w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
 .w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
 
@@ -1116,6 +1177,7 @@ function injectCSS(container) {
   .w-edit-help-topics{grid-template-columns:repeat(3,minmax(0,1fr));}
   .w-guide-topic:nth-child(5n) .w-guide-tooltip,.w-guide-topic:nth-child(5n-1) .w-guide-tooltip{left:0;right:auto;}
   .w-guide-topic:nth-child(3n) .w-guide-tooltip{left:auto;right:0;}
+  .w-edit-history-panel{left:10px;right:10px;width:auto;max-height:44vh;}
   .w-edit-tools{gap:5px;padding:7px 8px;}
   .w-edit-tool-btn{padding:4px 7px;font-size:9px;}
   .w-score-disclaimer{left:10px;right:10px;max-width:none;}
@@ -1168,6 +1230,8 @@ class PianoRoll {
     this.selectedNoteIndices = new Set();
     this.hoverNoteMode = null;
     this.draggingNote = null;
+    this.lasso = null;
+    this.isLassoSelecting = false;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.animId = 0;
@@ -1231,6 +1295,67 @@ class PianoRoll {
     this.selectedNoteIndex = -1;
   }
 
+  _rectsIntersect(a, b) {
+    return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
+  }
+
+  _normalizedRect(x1, y1, x2, y2) {
+    const x = Math.min(x1, x2);
+    const y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1);
+    const h = Math.abs(y2 - y1);
+    return { x, y, w, h };
+  }
+
+  _startLasso(x, y, additive = false) {
+    this.isLassoSelecting = true;
+    this.lasso = {
+      startX: x,
+      startY: y,
+      endX: x,
+      endY: y,
+      additive: Boolean(additive),
+    };
+    if (!additive) this._clearSelection();
+    this.canvas.style.cursor = 'crosshair';
+  }
+
+  _updateLasso(x, y) {
+    if (!this.isLassoSelecting || !this.lasso) return;
+    this.lasso.endX = x;
+    this.lasso.endY = y;
+    const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+    if (rect.w < 2 && rect.h < 2) return;
+
+    const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+    this.noteHitboxes.forEach(box => {
+      if (this._rectsIntersect(rect, box)) selected.add(box.index);
+    });
+
+    this.selectedNoteIndices = selected;
+    this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+    this.hoverNoteIndex = -1;
+    this.hoverNoteMode = null;
+  }
+
+  _finishLasso() {
+    if (!this.isLassoSelecting) return;
+    this.isLassoSelecting = false;
+    if (this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      if (rect.w >= 2 || rect.h >= 2) {
+        const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+        this.noteHitboxes.forEach(box => {
+          if (this._rectsIntersect(rect, box)) selected.add(box.index);
+        });
+        this.selectedNoteIndices = selected;
+        this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+      }
+    }
+    this.lasso = null;
+    this.canvas.style.cursor = 'default';
+  }
+
   _getSelectedIndicesOrdered() {
     return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
   }
@@ -1257,7 +1382,7 @@ class PianoRoll {
     this.hoverNoteIndex = -1;
     this.hoverNoteMode = null;
     this._clearSelection();
-    this._emitNotesMutation();
+    this._emitNotesMutation('Delete notes');
     return true;
   }
 
@@ -1390,9 +1515,9 @@ class PianoRoll {
     return Math.max(0, this.currentTime + (rollHeight - clampedY) / pps);
   }
 
-  _emitNotesMutation() {
+  _emitNotesMutation(action = 'Edit notes') {
     if (this.onNotesChange) this.onNotesChange(this.notes);
-    if (this.onEditCommit) this.onEditCommit(this.notes);
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
   }
 
   _addNoteAt(x, y) {
@@ -1411,7 +1536,7 @@ class PianoRoll {
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
     this._playNote(note.note);
-    this._emitNotesMutation();
+    this._emitNotesMutation('Add note');
     return true;
   }
 
@@ -1468,7 +1593,7 @@ class PianoRoll {
     this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
-    this._emitNotesMutation();
+    this._emitNotesMutation('Duplicate notes');
     return true;
   }
 
@@ -1547,10 +1672,18 @@ class PianoRoll {
     } else {
       this.selectedNoteIndex = this.draggingNote.index;
     }
+    const dragMode = this.draggingNote.mode;
     const changed = Boolean(this.draggingNote.changed);
     this.draggingNote = null;
     this.hoverNoteMode = null;
-    if (shouldCommit && changed && this.onEditCommit) this.onEditCommit(this.notes);
+    if (shouldCommit && changed && this.onEditCommit) {
+      const action = dragMode === 'duration'
+        ? 'Change note duration'
+        : dragMode === 'time'
+          ? 'Move note timing'
+          : 'Change note pitch';
+      this.onEditCommit(this.notes, { action });
+    }
   }
 
   _buildKeys(W) {
@@ -1596,7 +1729,12 @@ class PianoRoll {
             this._startNoteDrag(hit, y);
             return;
           }
+          if (e.button === 0) {
+            this._startLasso(x, y, e.metaKey || e.ctrlKey);
+            return;
+          }
           if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
+          return;
         }
         const k = this._hitTest(x, y);
         if (k) press(k.midi);
@@ -1606,6 +1744,11 @@ class PianoRoll {
         if (this.draggingNote) {
           this._updateNoteDrag(x, y);
           this._setCursor(y, this.draggingNote.mode);
+          return;
+        }
+        if (this.isLassoSelecting) {
+          this._updateLasso(x, y);
+          this.canvas.style.cursor = 'crosshair';
           return;
         }
 
@@ -1620,9 +1763,9 @@ class PianoRoll {
         const k = this._hitTest(x, y);
         if (k && !this.pressedKeys.has(k.midi)) { releaseAll(); press(k.midi); }
       },
-      mu: () => { this._finishNoteDrag(); releaseAll(); },
+      mu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
       ml: () => {
-        if (this.draggingNote) return;
+        if (this.draggingNote || this.isLassoSelecting) return;
         releaseAll();
         this.hoverNoteIndex = -1;
         this.hoverNoteMode = null;
@@ -1633,8 +1776,8 @@ class PianoRoll {
         const { x, y } = xy(e);
         this._updateNoteDrag(x, y);
       },
-      wu: () => { this._finishNoteDrag(); releaseAll(); },
-      wb: () => { this._finishNoteDrag(); releaseAll(); this.canvas.style.cursor = 'default'; },
+      wu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
+      wb: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); this.canvas.style.cursor = 'default'; },
       db: e => {
         if (!this.editMode || this.isPlaying) return;
         const { x, y } = xy(e);
@@ -1738,7 +1881,7 @@ class PianoRoll {
           this.selectedNoteIndex = indices[indices.length - 1];
           this.hoverNoteIndex = this.selectedNoteIndex;
           this.hoverNoteMode = 'pitch';
-          this._emitNotesMutation();
+          this._emitNotesMutation(e.key === 'ArrowRight' || e.key === 'ArrowLeft' ? 'Change note pitch' : 'Move note timing');
           e.preventDefault();
         }
       },
@@ -1900,6 +2043,15 @@ class PianoRoll {
     });
     ctx.shadowBlur=0; ctx.globalAlpha=1;
 
+    if (this.isLassoSelecting && this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      ctx.fillStyle = 'rgba(59,130,246,0.16)';
+      ctx.strokeStyle = 'rgba(147,197,253,0.92)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+    }
+
     const sg=ctx.createLinearGradient(0,ROLL_H,W,ROLL_H);
     sg.addColorStop(0,'rgba(59,130,246,0.15)');sg.addColorStop(0.3,'rgba(139,92,246,0.6)');sg.addColorStop(0.7,'rgba(139,92,246,0.6)');sg.addColorStop(1,'rgba(59,130,246,0.15)');
     ctx.strokeStyle=sg; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(0,ROLL_H); ctx.lineTo(W,ROLL_H); ctx.stroke();
@@ -2045,6 +2197,7 @@ class PianoRoll {
     this.hoverNoteIndex = -1;
     this.hoverNoteMode = null;
     if (!this.editMode) this._finishNoteDrag(false);
+    this._finishLasso();
     this._clearSelection();
   }
 
@@ -2067,6 +2220,7 @@ class PianoRoll {
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
     this._finishNoteDrag(false);
+    this._finishLasso();
     this.pressedKeys.clear();
     this.scrollHost.remove();
   }
@@ -2087,10 +2241,13 @@ class ScoreEditor {
     this.selectedNoteIndex = -1;
     this.selectedNoteIndices = new Set();
     this.draggingNote = null;
+    this.lasso = null;
+    this.isLassoSelecting = false;
     this.noteHitboxes = [];
     this.layout = null;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
+    this.readableMode = Boolean(options.readableMode);
     this.animId = 0;
 
     this.container.style.overflow = 'hidden';
@@ -2144,6 +2301,74 @@ class ScoreEditor {
     this.selectedNoteIndex = -1;
   }
 
+  _rectsIntersect(a, b) {
+    return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
+  }
+
+  _normalizedRect(x1, y1, x2, y2) {
+    const x = Math.min(x1, x2);
+    const y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1);
+    const h = Math.abs(y2 - y1);
+    return { x, y, w, h };
+  }
+
+  _hitboxRect(box) {
+    return {
+      x: box.noteX,
+      y: box.noteY,
+      w: box.noteW,
+      h: box.noteH,
+    };
+  }
+
+  _startLasso(x, y, additive = false) {
+    this.isLassoSelecting = true;
+    this.lasso = {
+      startX: x,
+      startY: y,
+      endX: x,
+      endY: y,
+      additive: Boolean(additive),
+    };
+    if (!additive) this._clearSelection();
+    this.canvas.style.cursor = 'crosshair';
+  }
+
+  _updateLasso(x, y) {
+    if (!this.isLassoSelecting || !this.lasso) return;
+    this.lasso.endX = x;
+    this.lasso.endY = y;
+    const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+    if (rect.w < 2 && rect.h < 2) return;
+
+    const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+    this.noteHitboxes.forEach(box => {
+      if (this._rectsIntersect(rect, this._hitboxRect(box))) selected.add(box.index);
+    });
+    this.selectedNoteIndices = selected;
+    this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+    this.hoverNoteIndex = -1;
+  }
+
+  _finishLasso() {
+    if (!this.isLassoSelecting) return;
+    this.isLassoSelecting = false;
+    if (this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      if (rect.w >= 2 || rect.h >= 2) {
+        const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+        this.noteHitboxes.forEach(box => {
+          if (this._rectsIntersect(rect, this._hitboxRect(box))) selected.add(box.index);
+        });
+        this.selectedNoteIndices = selected;
+        this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+      }
+    }
+    this.lasso = null;
+    this._setCursor(null);
+  }
+
   _getSelectedIndicesOrdered() {
     return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
   }
@@ -2170,7 +2395,7 @@ class ScoreEditor {
     this.hoverNoteIndex = -1;
     this._clearSelection();
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Delete notes');
     return true;
   }
 
@@ -2313,8 +2538,8 @@ class ScoreEditor {
     if (this.onNotesChange) this.onNotesChange(this.notes);
   }
 
-  _emitNotesCommit() {
-    if (this.onEditCommit) this.onEditCommit(this.notes);
+  _emitNotesCommit(action = 'Edit notes') {
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
   }
 
   _getActiveNoteIndex() {
@@ -2360,7 +2585,7 @@ class ScoreEditor {
     this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Duplicate notes');
     return true;
   }
 
@@ -2387,7 +2612,7 @@ class ScoreEditor {
     this._setSingleSelection(this.notes.length - 1);
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Add note');
     playPreviewNote(note.note, 0.5, 0.82).catch(error => console.error('Score preview note error:', error));
     return true;
   }
@@ -2504,6 +2729,7 @@ class ScoreEditor {
 
   _finishDrag(commit = true) {
     if (!this.draggingNote) return;
+    const dragMode = this.draggingNote.mode;
     const changed = Boolean(this.draggingNote.changed);
     if (!this._isSelected(this.draggingNote.index)) {
       this._setSingleSelection(this.draggingNote.index);
@@ -2512,7 +2738,12 @@ class ScoreEditor {
     }
     this.draggingNote = null;
     this._setCursor(null);
-    if (commit && changed) this._emitNotesCommit();
+    if (commit && changed) {
+      const action = dragMode === 'duration'
+        ? 'Change note duration'
+        : 'Move note pitch and timing';
+      this._emitNotesCommit(action);
+    }
   }
 
   _drawLedgerLines(ctx, x, step, layout) {
@@ -2547,22 +2778,30 @@ class ScoreEditor {
 
   _draw(ctx, W, H) {
     const layout = this._buildLayout(W, H);
+    const readable = this.readableMode;
     this.layout = layout;
     this.noteHitboxes = [];
 
     ctx.clearRect(0, 0, W, H);
     const bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#070914');
-    bg.addColorStop(1, '#090b18');
+    if (readable) {
+      bg.addColorStop(0, '#070a12');
+      bg.addColorStop(1, '#0a0f18');
+    } else {
+      bg.addColorStop(0, '#070914');
+      bg.addColorStop(1, '#090b18');
+    }
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
-    const staffGlow = ctx.createLinearGradient(0, layout.topY, 0, layout.bottomY);
-    staffGlow.addColorStop(0, 'rgba(59,130,246,0.05)');
-    staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
-    staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
-    ctx.fillStyle = staffGlow;
-    ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
+    if (!readable) {
+      const staffGlow = ctx.createLinearGradient(0, layout.topY, 0, layout.bottomY);
+      staffGlow.addColorStop(0, 'rgba(59,130,246,0.05)');
+      staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
+      staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
+      ctx.fillStyle = staffGlow;
+      ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
+    }
 
     const totalSec = layout.totalDuration;
     const visibleStartSec = Math.max(0, this.currentTime - layout.visiblePastSec - 1);
@@ -2572,22 +2811,24 @@ class ScoreEditor {
     for (let sec = firstSec; sec <= lastSec; sec += 1) {
       const x = this._timeToX(sec, layout);
       const isBar = sec % 4 === 0;
-      ctx.strokeStyle = isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)';
-      ctx.lineWidth = isBar ? 1.2 : 0.8;
+      ctx.strokeStyle = readable
+        ? (isBar ? 'rgba(148,163,184,0.28)' : 'rgba(148,163,184,0.12)')
+        : (isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)');
+      ctx.lineWidth = readable ? (isBar ? 1.1 : 0.7) : (isBar ? 1.2 : 0.8);
       ctx.beginPath();
       ctx.moveTo(x, layout.topY);
       ctx.lineTo(x, layout.bottomY);
       ctx.stroke();
       if (isBar) {
-        ctx.fillStyle = 'rgba(156,163,175,0.45)';
+        ctx.fillStyle = readable ? 'rgba(148,163,184,0.6)' : 'rgba(156,163,175,0.45)';
         ctx.font = '9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.fillText(`${sec}s`, x + 2, layout.topY - 6);
       }
     }
 
     const staffSteps = [...TREBLE_LINE_STEPS, ...BASS_LINE_STEPS];
-    ctx.strokeStyle = 'rgba(229,231,235,0.62)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = readable ? 'rgba(226,232,240,0.72)' : 'rgba(229,231,235,0.62)';
+    ctx.lineWidth = readable ? 1.05 : 1;
     staffSteps.forEach(step => {
       const y = this._stepToY(step, layout);
       ctx.beginPath();
@@ -2598,7 +2839,7 @@ class ScoreEditor {
 
     const bracketTop = this._stepToY(TREBLE_LINE_STEPS[0], layout);
     const bracketBottom = this._stepToY(BASS_LINE_STEPS[BASS_LINE_STEPS.length - 1], layout);
-    ctx.strokeStyle = 'rgba(229,231,235,0.5)';
+    ctx.strokeStyle = readable ? 'rgba(226,232,240,0.62)' : 'rgba(229,231,235,0.5)';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(layout.left - 12, bracketTop);
@@ -2607,18 +2848,22 @@ class ScoreEditor {
 
     const trebleY = this._stepToY(34, layout);
     const bassY = this._stepToY(22, layout);
-    ctx.fillStyle = 'rgba(221,214,254,0.82)';
+    ctx.fillStyle = readable ? 'rgba(203,213,225,0.9)' : 'rgba(221,214,254,0.82)';
     ctx.font = `${Math.max(34, Math.round(layout.lineGap * 3.8))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
     ctx.fillText('𝄞', layout.left - 54, trebleY + (layout.lineGap * 1.6));
     ctx.font = `${Math.max(28, Math.round(layout.lineGap * 3.0))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
     ctx.fillText('𝄢', layout.left - 52, bassY + (layout.lineGap * 1.25));
-    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
-    ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
+    if (!readable) {
+      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
+      ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
+    }
 
     const playheadX = layout.playheadX;
-    ctx.strokeStyle = this.isPlaying ? 'rgba(110,231,183,0.85)' : 'rgba(167,139,250,0.5)';
-    ctx.lineWidth = this.isPlaying ? 1.8 : 1.2;
+    ctx.strokeStyle = this.isPlaying
+      ? (readable ? 'rgba(45,212,191,0.92)' : 'rgba(110,231,183,0.85)')
+      : (readable ? 'rgba(148,163,184,0.58)' : 'rgba(167,139,250,0.5)');
+    ctx.lineWidth = this.isPlaying ? 1.8 : (readable ? 1.05 : 1.2);
     ctx.beginPath();
     ctx.moveTo(playheadX, layout.topY - 8);
     ctx.lineTo(playheadX, layout.bottomY + 8);
@@ -2639,9 +2884,15 @@ class ScoreEditor {
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const isLive = this.isPlaying && this.currentTime >= (Number(note.startTime) || 0) && this.currentTime < ((Number(note.startTime) || 0) + duration);
 
-      const color = this._noteColor(midi);
-      const accent = selected ? 'rgba(196,181,253,1)' : (hovered ? 'rgba(196,181,253,0.72)' : 'rgba(255,255,255,0.22)');
-      const durStroke = isLive ? 'rgba(110,231,183,0.82)' : (selected || hovered ? 'rgba(196,181,253,0.78)' : 'rgba(255,255,255,0.34)');
+      const color = readable ? 'rgb(186,230,253)' : this._noteColor(midi);
+      const accent = readable
+        ? (selected ? 'rgba(125,211,252,0.96)' : (hovered ? 'rgba(125,211,252,0.75)' : 'rgba(226,232,240,0.2)'))
+        : (selected ? 'rgba(196,181,253,1)' : (hovered ? 'rgba(196,181,253,0.72)' : 'rgba(255,255,255,0.22)'));
+      const durStroke = isLive
+        ? (readable ? 'rgba(45,212,191,0.92)' : 'rgba(110,231,183,0.82)')
+        : (selected || hovered
+          ? (readable ? 'rgba(125,211,252,0.9)' : 'rgba(196,181,253,0.78)')
+          : (readable ? 'rgba(203,213,225,0.46)' : 'rgba(255,255,255,0.34)'));
 
       this._drawLedgerLines(ctx, x, step, layout);
 
@@ -2661,8 +2912,8 @@ class ScoreEditor {
       ctx.translate(x, y);
       ctx.rotate(-0.38);
       ctx.shadowColor = color;
-      ctx.shadowBlur = selected || isLive ? 12 : 5;
-      ctx.fillStyle = isLive ? '#a7f3d0' : color;
+      ctx.shadowBlur = readable ? (selected || isLive ? 4 : 1) : (selected || isLive ? 12 : 5);
+      ctx.fillStyle = isLive ? (readable ? '#5eead4' : '#a7f3d0') : color;
       ctx.beginPath();
       ctx.ellipse(0, 0, layout.noteHeadW * 0.58, layout.noteHeadH * 0.85, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -2673,7 +2924,7 @@ class ScoreEditor {
       ctx.restore();
 
       if (BLACK_S.has(midi % 12)) {
-        ctx.fillStyle = 'rgba(229,231,235,0.82)';
+        ctx.fillStyle = readable ? 'rgba(226,232,240,0.9)' : 'rgba(229,231,235,0.82)';
         ctx.font = `bold ${Math.max(10, Math.round(layout.lineGap * 0.7))}px "Times New Roman", Georgia, serif`;
         ctx.fillText('#', x - layout.noteHeadW - 9, y + 4);
       }
@@ -2698,6 +2949,15 @@ class ScoreEditor {
       });
     });
 
+    if (this.isLassoSelecting && this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      ctx.fillStyle = 'rgba(59,130,246,0.12)';
+      ctx.strokeStyle = 'rgba(147,197,253,0.9)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+    }
+
   }
 
   _bindEvents() {
@@ -2720,6 +2980,10 @@ class ScoreEditor {
           this._startDrag(hit, x, y);
           return;
         }
+        if (e.button === 0) {
+          this._startLasso(x, y, e.metaKey || e.ctrlKey);
+          return;
+        }
         if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
       },
       mm: e => {
@@ -2729,28 +2993,41 @@ class ScoreEditor {
           this._setCursor(this.draggingNote);
           return;
         }
+        if (this.isLassoSelecting) {
+          this._updateLasso(x, y);
+          this.canvas.style.cursor = 'crosshair';
+          return;
+        }
         const hit = this.editMode && !this.isPlaying ? this._hitNote(x, y) : null;
         this.hoverNoteIndex = hit ? hit.index : -1;
         this._setCursor(hit);
       },
       mu: () => {
         this._finishDrag(true);
+        this._finishLasso();
       },
       ml: () => {
-        if (this.draggingNote) return;
+        if (this.draggingNote || this.isLassoSelecting) return;
         this.hoverNoteIndex = -1;
         this._setCursor(null);
       },
       wm: e => {
+        if (this.isLassoSelecting) {
+          const { x, y } = xy(e);
+          this._updateLasso(x, y);
+          return;
+        }
         if (!this.draggingNote) return;
         const { x, y } = xy(e);
         this._updateDrag(x, y);
       },
       wu: () => {
         this._finishDrag(true);
+        this._finishLasso();
       },
       wb: () => {
         this._finishDrag(false);
+        this._finishLasso();
         this._setCursor(null);
       },
       db: e => {
@@ -2862,7 +3139,12 @@ class ScoreEditor {
           this.selectedNoteIndex = indices[indices.length - 1];
           this.hoverNoteIndex = this.selectedNoteIndex;
           this._emitNotesChange();
-          this._emitNotesCommit();
+          const action = e.key === 'ArrowUp' || e.key === 'ArrowDown'
+            ? 'Change note pitch'
+            : e.key === 'ArrowRight' || e.key === 'ArrowLeft'
+              ? 'Move note timing'
+              : 'Change note duration';
+          this._emitNotesCommit(action);
           e.preventDefault();
         }
       },
@@ -2918,12 +3200,17 @@ class ScoreEditor {
     }
   }
 
+  setReadableMode(enabled) {
+    this.readableMode = Boolean(enabled);
+  }
+
   setEditMode(enabled) {
     const next = Boolean(enabled);
     if (next === this.editMode) return;
     this.editMode = next;
     this.hoverNoteIndex = -1;
     if (!this.editMode) this._finishDrag(false);
+    this._finishLasso();
     this._clearSelection();
     this._setCursor(null);
   }
@@ -2932,6 +3219,7 @@ class ScoreEditor {
     cancelAnimationFrame(this.animId);
     this._ro.disconnect();
     this._finishDrag(false);
+    this._finishLasso();
     const c = this.canvas;
     c.removeEventListener('mousedown', this._h.md);
     c.removeEventListener('mousemove', this._h.mm);
@@ -3117,6 +3405,7 @@ function _renderEditGuideOverlay(isScoreView) {
       title: 'Multi-select',
       details: [
         '<strong>Cmd/Ctrl + Click:</strong> add or remove notes from selection.',
+        '<strong>Drag on empty editor space:</strong> lasso/box select multiple notes at once.',
         '<strong>Cmd/Ctrl + A:</strong> select all editable notes in the current view.',
         '<strong>Delete / Backspace:</strong> remove every selected note at once.',
         '<strong>Cmd/Ctrl + D and arrows:</strong> duplicate or move the full selection together.',
@@ -3269,6 +3558,50 @@ function _syncGuideOverlay(content) {
   }
 }
 
+function _renderEditHistoryPanel() {
+  const items = _editHistoryEntries.slice(0, 24);
+  return `
+    <div class="w-edit-history-panel">
+      <div class="w-edit-history-head">
+        <p>Edit History</p>
+        <span class="w-edit-history-meta">Undo ${_notesUndoStack.length} · Redo ${_notesRedoStack.length}</span>
+      </div>
+      <div class="w-edit-history-list">
+        ${items.length ? items.map(item => `
+          <div class="w-edit-history-item">
+            <div class="w-edit-history-item-head">
+              <span class="w-edit-history-type">${item.type}</span>
+              <span>${item.stamp}</span>
+            </div>
+            <p>${item.action}</p>
+          </div>
+        `).join('') : '<div class="w-edit-history-empty">No edit actions yet.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function _syncHistoryOverlay(content) {
+  if (!content) return;
+  const wrap = content.querySelector('.w-piano-wrap');
+  const body = content.querySelector('#piano-body');
+  if (!wrap || !body) return;
+
+  const shouldShow = state.noteEditMode && state.stage === 'ready' && state.noteHistoryOpen;
+  const existing = wrap.querySelector('.w-edit-history-panel');
+  if (!shouldShow) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const panelHtml = _renderEditHistoryPanel();
+  if (existing) {
+    existing.outerHTML = panelHtml;
+  } else {
+    body.insertAdjacentHTML('beforebegin', panelHtml);
+  }
+}
+
 function renderDashboard(content) {
   destroyInstances();
   const aM = state.selectedModel;
@@ -3415,6 +3748,11 @@ function renderDashboard(content) {
             >
               ${state.noteEditMode ? 'Editing On' : 'Edit Notes'}
             </button>
+            ${canEditNotes && isScoreView ? `
+              <button class="w-score-readable-btn ${state.scoreReadableMode ? 'active' : ''}" id="score-readable-toggle">
+                Readable Score
+              </button>
+            ` : ''}
             ${canEditNotes ? `
               <button class="w-note-guide-btn ${state.noteGuideOpen ? 'active' : ''}" id="guide-toggle">
                 ${state.noteGuideOpen ? 'Hide Guide' : 'Show Guide'}
@@ -3433,6 +3771,7 @@ function renderDashboard(content) {
           <div class="w-edit-tools">
             <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>Undo</button>
             <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>Redo</button>
+            <button class="w-edit-tool-btn ${state.noteHistoryOpen ? 'active' : ''}" id="history-toggle">${state.noteHistoryOpen ? 'Hide History' : 'History'}</button>
             <div class="w-edit-zoom">
               <span class="w-edit-zoom-label">X</span>
               <button class="w-edit-tool-btn" id="zoom-x-out">-</button>
@@ -3448,6 +3787,7 @@ function renderDashboard(content) {
           </div>
         ` : ''}
         ${state.noteEditMode && state.stage === 'ready' && state.noteGuideOpen ? _renderEditGuideOverlay(isScoreView) : ''}
+        ${state.noteEditMode && state.stage === 'ready' && state.noteHistoryOpen ? _renderEditHistoryPanel() : ''}
         <div class="w-piano-body" id="piano-body"></div>
         ${isScoreView ? `
           <div class="w-score-disclaimer">
@@ -3472,9 +3812,11 @@ function renderDashboard(content) {
       onNotesChange: notes => {
         if (state.stage === 'ready') state.midiNotes = notes;
       },
-      onEditCommit: notes => {
-        _applyEditorNotesCommit(content, notes);
+      onEditCommit: (notes, meta = null) => {
+        const action = meta && typeof meta.action === 'string' ? meta.action : 'Edit notes';
+        _applyEditorNotesCommit(content, notes, action);
       },
+      readableMode: state.scoreReadableMode,
     };
 
     if (isScoreView) {
@@ -3482,6 +3824,7 @@ function renderDashboard(content) {
       _scoreEditor.setTime(state.midiTime);
       _scoreEditor.setPlaying(state.midiPlaying);
       _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
+      _scoreEditor.setReadableMode(state.scoreReadableMode);
       _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
@@ -3583,6 +3926,16 @@ function renderDashboard(content) {
     persistGuideOpen(state.noteGuideOpen);
     _syncEditToolbar(content);
     _syncGuideOverlay(content);
+  });
+  content.querySelector('#history-toggle')?.addEventListener('click', () => {
+    state.noteHistoryOpen = !state.noteHistoryOpen;
+    _syncEditToolbar(content);
+    _syncHistoryOverlay(content);
+  });
+  content.querySelector('#score-readable-toggle')?.addEventListener('click', () => {
+    state.scoreReadableMode = !state.scoreReadableMode;
+    if (_scoreEditor) _scoreEditor.setReadableMode(state.scoreReadableMode);
+    _syncEditToolbar(content);
   });
   content.querySelector('#zoom-x-in')?.addEventListener('click', () => updateEditorZoom('x', 'in'));
   content.querySelector('#zoom-x-out')?.addEventListener('click', () => updateEditorZoom('x', 'out'));
