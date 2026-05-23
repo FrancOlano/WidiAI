@@ -97,6 +97,7 @@ const STORAGE_KEYS = {
   selectedModel: 'widi.selectedModel',
   lastAudioId: 'widi.lastAudioId',
   apiUrl: 'widi.apiUrl',
+  noteGuideOpen: 'widi.noteGuideOpen',
 };
 
 const AUDIO_DB = {
@@ -132,6 +133,17 @@ const persistSelectedModel = (model) => {
     localStorage.setItem(STORAGE_KEYS.selectedModel, model);
     window.selectedModel = model;
   }
+};
+
+const getStoredGuideOpen = () => {
+  const stored = localStorage.getItem(STORAGE_KEYS.noteGuideOpen);
+  if (stored === '0') return false;
+  if (stored === '1') return true;
+  return true;
+};
+
+const persistGuideOpen = (open) => {
+  localStorage.setItem(STORAGE_KEYS.noteGuideOpen, open ? '1' : '0');
 };
 
 
@@ -240,6 +252,7 @@ const resolveAudioForTranscription = async () => {
 };
 
 const storedModel = getStoredModel();
+const storedGuideOpen = getStoredGuideOpen();
 
 const state = {
   page: 'dashboard',
@@ -262,6 +275,11 @@ const state = {
   midiTempo: null,
   noteEditMode: false,
   noteEditorView: 'roll',
+  noteGuideOpen: storedGuideOpen,
+  rollZoomX: 1,
+  rollZoomY: 1,
+  scoreZoomX: 1,
+  scoreZoomY: 1,
   statusMessage: '',
   statusType: 'info',
   modelDropdownOpen: false,
@@ -288,8 +306,12 @@ let _nativeAudioCtx = null, _nativeMasterGain = null;
 let _nativeTimers = [], _nativeNodes = new Set();
 let _nativeStartPerf = 0, _nativeStartOffset = 0;
 let _audioUnlockBound = false;
+let _transportKeysBound = false;
 let _sf2Synth = null, _sf2AudioNode = null;
 let _sf2InitPromise = null, _sf2UnavailableReason = '';
+let _notesUndoStack = [];
+let _notesRedoStack = [];
+let _lastCommittedNotesSnapshot = null;
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
@@ -303,6 +325,133 @@ const clearStatusMessage = () => {
   state.statusMessage = '';
   state.statusType = 'info';
 };
+
+function _cloneNotes(notes) {
+  return (Array.isArray(notes) ? notes : []).map(note => ({
+    note: Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(note.note) || MIDI_LO))),
+    startTime: Math.max(0, Number(note.startTime) || 0),
+    duration: Math.max(0.03, Number(note.duration) || 0.12),
+    velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+  }));
+}
+
+function _notesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const na = a[i];
+    const nb = b[i];
+    if (
+      na.note !== nb.note ||
+      Math.abs((na.startTime || 0) - (nb.startTime || 0)) > 0.0001 ||
+      Math.abs((na.duration || 0) - (nb.duration || 0)) > 0.0001 ||
+      na.velocity !== nb.velocity
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function _replaceMidiNotesInPlace(nextNotes) {
+  const next = _cloneNotes(nextNotes);
+  if (!Array.isArray(state.midiNotes)) {
+    state.midiNotes = next;
+    return;
+  }
+  state.midiNotes.splice(0, state.midiNotes.length, ...next);
+}
+
+function _resetEditHistory() {
+  _notesUndoStack = [];
+  _notesRedoStack = [];
+  _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+}
+
+function _pushUndoSnapshotIfNeeded() {
+  const current = _cloneNotes(state.midiNotes);
+  if (_lastCommittedNotesSnapshot && _notesEqual(current, _lastCommittedNotesSnapshot)) return false;
+  if (_lastCommittedNotesSnapshot) {
+    _notesUndoStack.push(_cloneNotes(_lastCommittedNotesSnapshot));
+    if (_notesUndoStack.length > 120) _notesUndoStack.shift();
+  }
+  _notesRedoStack = [];
+  _lastCommittedNotesSnapshot = current;
+  return true;
+}
+
+function _applyEditorNotesCommit(content, notes) {
+  if (state.stage !== 'ready') return false;
+  _replaceMidiNotesInPlace(notes);
+  const changed = _pushUndoSnapshotIfNeeded();
+  if (!changed) {
+    _updateSeek(content);
+    _syncEditToolbar(content);
+    return false;
+  }
+  const rebuilt = _rebuildMidiBlobFromEditedNotes();
+  if (!rebuilt) {
+    console.warn('MIDI notes changed, but MIDI export refresh failed.');
+  }
+  _updateSeek(content);
+  _syncEditToolbar(content);
+  return true;
+}
+
+function _undoNoteEdit(content) {
+  if (state.stage !== 'ready' || state.midiPlaying || !_notesUndoStack.length) return false;
+  const snapshot = _notesUndoStack.pop();
+  _notesRedoStack.push(_cloneNotes(state.midiNotes));
+  if (_notesRedoStack.length > 120) _notesRedoStack.shift();
+  _replaceMidiNotesInPlace(snapshot);
+  _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  const rebuilt = _rebuildMidiBlobFromEditedNotes();
+  if (!rebuilt) console.warn('Undo applied, but MIDI export refresh failed.');
+  if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
+  _updateSeek(content);
+  _syncEditToolbar(content);
+  return true;
+}
+
+function _redoNoteEdit(content) {
+  if (state.stage !== 'ready' || state.midiPlaying || !_notesRedoStack.length) return false;
+  const snapshot = _notesRedoStack.pop();
+  _notesUndoStack.push(_cloneNotes(state.midiNotes));
+  if (_notesUndoStack.length > 120) _notesUndoStack.shift();
+  _replaceMidiNotesInPlace(snapshot);
+  _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  const rebuilt = _rebuildMidiBlobFromEditedNotes();
+  if (!rebuilt) console.warn('Redo applied, but MIDI export refresh failed.');
+  if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
+  _updateSeek(content);
+  _syncEditToolbar(content);
+  return true;
+}
+
+function _syncEditToolbar(content) {
+  if (!content) return;
+  const playbackLocked = state.midiPlaying || state.stage !== 'ready';
+  const undoBtn = content.querySelector('#edit-undo');
+  const redoBtn = content.querySelector('#edit-redo');
+  if (undoBtn) undoBtn.disabled = playbackLocked || _notesUndoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = playbackLocked || _notesRedoStack.length === 0;
+
+  const guideToggle = content.querySelector('#guide-toggle');
+  if (guideToggle) {
+    guideToggle.textContent = state.noteGuideOpen ? 'Hide Guide' : 'Show Guide';
+    guideToggle.classList.toggle('active', state.noteGuideOpen);
+  }
+
+  const activeZoomX = state.noteEditorView === 'score' ? state.scoreZoomX : state.rollZoomX;
+  const activeZoomY = state.noteEditorView === 'score' ? state.scoreZoomY : state.rollZoomY;
+  const xReset = content.querySelector('#zoom-x-reset');
+  const yReset = content.querySelector('#zoom-y-reset');
+  if (xReset) xReset.textContent = `${activeZoomX.toFixed(2)}x`;
+  if (yReset) yReset.textContent = `${activeZoomY.toFixed(2)}x`;
+  ['#zoom-x-in', '#zoom-x-out', '#zoom-x-reset', '#zoom-y-in', '#zoom-y-out', '#zoom-y-reset'].forEach(selector => {
+    const button = content.querySelector(selector);
+    if (button) button.disabled = playbackLocked;
+  });
+}
 
 function resetMidiData() {
   cancelAnimationFrame(_midiRaf);
@@ -320,6 +469,11 @@ function resetMidiData() {
   state.midiTime = 0;
   state.noteEditMode = false;
   state.noteEditorView = 'roll';
+  state.rollZoomX = 1;
+  state.rollZoomY = 1;
+  state.scoreZoomX = 1;
+  state.scoreZoomY = 1;
+  _resetEditHistory();
 }
 
 function getNativeAudioContext() {
@@ -722,6 +876,7 @@ function injectCSS(container) {
 
 /* Dashboard Layout */
 .w-dashboard{display:flex;flex-direction:column;flex:1;padding:20px 24px 24px;gap:14px;overflow-y:auto;overflow-x:hidden;min-width:0;}
+.w-dashboard.editing-focus{padding-bottom:0;}
 .w-top-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;min-width:0;}
 .w-top-grid > .w-panel{min-width:0;}
 
@@ -811,15 +966,17 @@ function injectCSS(container) {
 .w-convert-btn{width:100%;border-radius:14px;padding:14px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:13px;font-weight:600;transition:all 0.35s cubic-bezier(0.4,0,0.2,1);}
 
 /* Piano Roll - Premium Container */
-.w-piano-wrap{border-radius:20px 20px 0 0;overflow:hidden;flex-shrink:0;height:330px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);border-bottom:none;box-shadow:0 -4px 24px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;display:flex;flex-direction:column;}
-.w-piano-wrap.edit-mode{height:clamp(750px,100vh,980px);min-height:750px;}
-.w-piano-wrap.edit-mode .w-piano-body{min-height:530px;}
+.w-piano-wrap{position:relative;border-radius:20px 20px 0 0;overflow:hidden;flex-shrink:0;height:330px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);border-bottom:none;box-shadow:0 -4px 24px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;display:flex;flex-direction:column;}
+.w-piano-wrap.edit-mode{height:clamp(730px,95vh,940px);min-height:730px;}
+.w-piano-wrap.edit-mode .w-piano-body{min-height:510px;}
 .w-piano-header{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(0,0,0,0.4),rgba(0,0,0,0.3));backdrop-filter:blur(12px);}
 .w-piano-body{flex:1;min-height:180px;}
+.w-roll-scroll{width:100%;height:100%;overflow-y:hidden;overflow-x:hidden;}
+.w-roll-scroll.scroll-x{overflow-x:auto;}
 .w-live-badge{display:flex;align-items:center;gap:7px;border-radius:24px;padding:5px 12px;background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.3);box-shadow:0 0 12px rgba(16,185,129,0.15);}
 @keyframes blink{0%,100%{opacity:1;}50%{opacity:0.25;}}
 .w-live-dot{width:7px;height:7px;border-radius:50%;background:#10b981;box-shadow:0 0 8px rgba(16,185,129,0.8);animation:blink 1.2s infinite;}
-.w-piano-meta{display:flex;align-items:center;gap:10px;}
+.w-piano-meta{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap;}
 .w-edit-pill{display:flex;align-items:center;gap:7px;border-radius:999px;padding:5px 12px;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.32);box-shadow:0 0 12px rgba(139,92,246,0.14);}
 .w-edit-pill-dot{width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 8px rgba(167,139,250,0.8);}
 .w-note-view-switch{display:flex;align-items:center;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
@@ -830,16 +987,34 @@ function injectCSS(container) {
 .w-note-edit-btn:hover:not(:disabled){background:rgba(139,92,246,0.14);border-color:rgba(139,92,246,0.34);color:#c4b5fd;}
 .w-note-edit-btn.active{background:rgba(139,92,246,0.2);border-color:rgba(139,92,246,0.44);color:#ddd6fe;box-shadow:0 0 12px rgba(139,92,246,0.22);}
 .w-note-edit-btn:disabled{opacity:0.45;cursor:not-allowed;}
-.w-edit-help{padding:10px 14px 12px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(139,92,246,0.08),rgba(59,130,246,0.04));}
-.w-edit-help-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
-.w-edit-help-head p{font-size:10px;color:#ddd6fe;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;}
-.w-edit-help-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
-.w-edit-help-card{border-radius:10px;padding:8px 9px;background:rgba(10,10,18,0.5);border:1px solid rgba(255,255,255,0.08);box-shadow:0 1px 0 rgba(255,255,255,0.04) inset;min-width:0;}
-.w-edit-help-card p{line-height:1.25;}
-.w-edit-help-title{font-size:10px;color:#c4b5fd;font-weight:700;margin-bottom:4px;}
-.w-edit-help-desc{font-size:10px;color:#a1a1aa;}
-.w-keycaps{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;}
-.w-keycap{font-size:9px;color:#e5e7eb;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:2px 6px;font-weight:700;letter-spacing:0.02em;}
+.w-note-guide-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
+.w-note-guide-btn:hover:not(:disabled){background:rgba(59,130,246,0.14);border-color:rgba(59,130,246,0.34);color:#bfdbfe;}
+.w-note-guide-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-note-guide-btn.active{background:rgba(59,130,246,0.2);border-color:rgba(59,130,246,0.44);color:#dbeafe;box-shadow:0 0 12px rgba(59,130,246,0.2);}
+.w-edit-tools{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(12,12,22,0.7),rgba(10,10,18,0.55));}
+.w-edit-tool-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid rgba(255,255,255,0.12);border-radius:7px;background:rgba(255,255,255,0.04);color:#d1d5db;padding:5px 9px;font-size:10px;font-weight:700;letter-spacing:0.03em;cursor:pointer;transition:all 0.2s;}
+.w-edit-tool-btn:hover{background:rgba(139,92,246,0.16);border-color:rgba(139,92,246,0.38);}
+.w-edit-tool-btn:disabled{opacity:0.35;cursor:not-allowed;}
+.w-edit-tool-btn.active{background:rgba(16,185,129,0.18);border-color:rgba(16,185,129,0.35);color:#86efac;}
+.w-edit-tool-btn.active:hover{background:rgba(16,185,129,0.24);}
+.w-edit-zoom{display:flex;align-items:center;gap:5px;padding:4px 7px;border-radius:8px;border:1px solid rgba(255,255,255,0.09);background:rgba(0,0,0,0.26);}
+.w-edit-zoom-label{font-size:10px;color:#9ca3af;font-weight:700;letter-spacing:0.04em;min-width:15px;}
+.w-edit-help-overlay{position:absolute;left:10px;right:10px;top:92px;bottom:auto;z-index:35;border-radius:14px;padding:11px;background:linear-gradient(180deg,rgba(7,10,24,0.94),rgba(8,8,18,0.9));border:1px solid rgba(139,92,246,0.34);box-shadow:0 10px 32px rgba(0,0,0,0.5),0 0 22px rgba(139,92,246,0.16) inset;backdrop-filter:blur(10px);}
+.w-edit-help-overlay-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;}
+.w-edit-help-overlay-title{font-size:10px;color:#e9d5ff;font-weight:800;letter-spacing:0.07em;text-transform:uppercase;}
+.w-edit-help-overlay-hint{font-size:9px;color:#93c5fd;letter-spacing:0.04em;}
+.w-edit-help-topics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;align-content:start;}
+.w-guide-topic{position:relative;min-width:0;}
+.w-guide-topic-title{width:100%;display:flex;align-items:center;justify-content:center;min-height:30px;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#e5e7eb;font-size:10px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.w-guide-topic:hover .w-guide-topic-title,.w-guide-topic:focus-within .w-guide-topic-title{background:rgba(139,92,246,0.22);border-color:rgba(139,92,246,0.44);color:#f5f3ff;}
+.w-guide-tooltip{position:absolute;left:0;top:calc(100% + 8px);width:min(360px,72vw);padding:10px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.38);background:linear-gradient(145deg,rgba(8,8,18,0.98),rgba(10,14,26,0.97));box-shadow:0 8px 20px rgba(0,0,0,0.45);opacity:0;transform:translateY(-5px);pointer-events:none;transition:opacity 0.18s ease,transform 0.18s ease;z-index:40;}
+.w-guide-topic:hover .w-guide-tooltip,.w-guide-topic:focus-within .w-guide-tooltip{opacity:1;transform:translateY(0);}
+.w-guide-topic:nth-child(5n) .w-guide-tooltip,.w-guide-topic:nth-child(5n-1) .w-guide-tooltip{left:auto;right:0;}
+.w-guide-tooltip-title{font-size:10px;font-weight:800;color:#ddd6fe;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:5px;}
+.w-guide-tooltip p{font-size:10px;color:#cbd5e1;line-height:1.35;margin-top:3px;}
+.w-guide-tooltip strong{color:#f5f3ff;font-weight:700;}
+.w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
+.w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
 
 /* History Page */
 .w-history{display:flex;flex-direction:column;flex:1;overflow:hidden;padding:20px 24px;gap:14px;}
@@ -933,14 +1108,17 @@ function injectCSS(container) {
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
 .w-fade-in{animation:fadeIn 0.25s ease;}
 
-@media (max-width: 1320px){
-  .w-top-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
-}
 @media (max-width: 1040px){
   .w-top-grid{grid-template-columns:minmax(0,1fr);}
-  .w-piano-wrap.edit-mode{height:clamp(690px,96vh,860px);min-height:690px;}
-  .w-piano-wrap.edit-mode .w-piano-body{min-height:450px;}
-  .w-edit-help-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .w-piano-wrap.edit-mode{height:clamp(660px,93vh,820px);min-height:660px;}
+  .w-piano-wrap.edit-mode .w-piano-body{min-height:430px;}
+  .w-edit-help-overlay{top:86px;}
+  .w-edit-help-topics{grid-template-columns:repeat(3,minmax(0,1fr));}
+  .w-guide-topic:nth-child(5n) .w-guide-tooltip,.w-guide-topic:nth-child(5n-1) .w-guide-tooltip{left:0;right:auto;}
+  .w-guide-topic:nth-child(3n) .w-guide-tooltip{left:auto;right:0;}
+  .w-edit-tools{gap:5px;padding:7px 8px;}
+  .w-edit-tool-btn{padding:4px 7px;font-size:9px;}
+  .w-score-disclaimer{left:10px;right:10px;max-width:none;}
 }
   `;
   container.appendChild(style);
@@ -979,28 +1157,125 @@ class PianoRoll {
     this.editMode = Boolean(options.editMode);
     this.onNotesChange = typeof options.onNotesChange === 'function' ? options.onNotesChange : null;
     this.onEditCommit = typeof options.onEditCommit === 'function' ? options.onEditCommit : null;
+    this.onUndoRequest = typeof options.onUndoRequest === 'function' ? options.onUndoRequest : null;
+    this.onRedoRequest = typeof options.onRedoRequest === 'function' ? options.onRedoRequest : null;
     this.currentTime = 0;
     this.isPlaying = false;
     this.pressedKeys = new Set();
     this.noteHitboxes = [];
     this.hoverNoteIndex = -1;
     this.selectedNoteIndex = -1;
+    this.selectedNoteIndices = new Set();
     this.hoverNoteMode = null;
     this.draggingNote = null;
+    this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
+    this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.animId = 0;
     this.lastTs = null;
     this.internalTime = 0;
     this.W = 0; this.H = 0;
+    this.viewportW = 0;
+    this.scrollRatio = 0;
     this.keys = [];
+
+    this.scrollHost = document.createElement('div');
+    this.scrollHost.className = 'w-roll-scroll';
+    container.appendChild(this.scrollHost);
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'display:block;width:100%;height:100%;';
-    container.appendChild(this.canvas);
+    this.scrollHost.appendChild(this.canvas);
 
     this._ro = new ResizeObserver(() => this._setup());
     this._ro.observe(container);
     this._setup();
     this._bindEvents();
+  }
+
+  _localPointFromEvent(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (this.W / Math.max(1, rect.width));
+    const y = (e.clientY - rect.top) * (this.H / Math.max(1, rect.height));
+    return { x, y };
+  }
+
+  _isSelected(index) {
+    return this.selectedNoteIndices.has(index);
+  }
+
+  _setSingleSelection(index) {
+    this.selectedNoteIndices.clear();
+    if (Number.isInteger(index) && index >= 0 && index < this.notes.length) {
+      this.selectedNoteIndices.add(index);
+      this.selectedNoteIndex = index;
+    } else {
+      this.selectedNoteIndex = -1;
+    }
+  }
+
+  _toggleSelection(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.notes.length) return;
+    if (this.selectedNoteIndices.has(index)) {
+      this.selectedNoteIndices.delete(index);
+      this.selectedNoteIndex = this.selectedNoteIndices.size
+        ? Array.from(this.selectedNoteIndices).sort((a, b) => a - b)[this.selectedNoteIndices.size - 1]
+        : -1;
+      return;
+    }
+    this.selectedNoteIndices.add(index);
+    this.selectedNoteIndex = index;
+  }
+
+  _clearSelection() {
+    this.selectedNoteIndices.clear();
+    this.selectedNoteIndex = -1;
+  }
+
+  _getSelectedIndicesOrdered() {
+    return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
+  }
+
+  _getEditableIndicesForOperations(activeIndex = -1) {
+    const selected = this._getSelectedIndicesOrdered();
+    if (selected.length) return selected;
+    if (Number.isInteger(activeIndex) && activeIndex >= 0 && activeIndex < this.notes.length) return [activeIndex];
+    return [];
+  }
+
+  _deleteNotesByIndices(indices) {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const unique = Array.from(new Set(indices))
+      .filter(index => Number.isInteger(index) && index >= 0 && index < this.notes.length)
+      .sort((a, b) => b - a);
+    if (!unique.length) return false;
+
+    unique.forEach(index => {
+      this.notes.splice(index, 1);
+    });
+
+    this.draggingNote = null;
+    this.hoverNoteIndex = -1;
+    this.hoverNoteMode = null;
+    this._clearSelection();
+    this._emitNotesMutation();
+    return true;
+  }
+
+  getSelectionTimeRange() {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return null;
+    let minStart = Number.POSITIVE_INFINITY;
+    let maxEnd = 0;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const start = Math.max(0, Number(note.startTime) || 0);
+      const duration = Math.max(0.03, Number(note.duration) || 0.12);
+      minStart = Math.min(minStart, start);
+      maxEnd = Math.max(maxEnd, start + duration);
+    });
+    if (!Number.isFinite(minStart) || maxEnd <= minStart) return null;
+    return { start: minStart, end: maxEnd };
   }
 
   _playNote(midi) {
@@ -1027,7 +1302,7 @@ class PianoRoll {
 
   _getRollPixelsPerSecond() {
     const rollHeight = Math.max(60, this.H - KEY_H);
-    return rollHeight / 3.5;
+    return (rollHeight / 3.5) * this.zoomY;
   }
 
   _resolveNoteDragMode(box, y) {
@@ -1047,16 +1322,32 @@ class PianoRoll {
     return null;
   }
 
-  _startNoteDrag(hit, clientY) {
+  _startNoteDrag(hit, localY) {
     if (!hit || !hit.noteRef) return false;
-    this.selectedNoteIndex = hit.index;
+    const targetIndices = this._isSelected(hit.index)
+      ? this._getEditableIndicesForOperations(hit.index)
+      : [hit.index];
+    if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
+    const snapshots = targetIndices.map(index => {
+      const note = this.notes[index];
+      return {
+        index,
+        noteRef: note,
+        startDuration: Math.max(0.03, Number(note?.duration) || 0.12),
+        startStartTime: Math.max(0, Number(note?.startTime) || 0),
+        startMidi: clampMidi(note?.note),
+      };
+    });
+
     this.draggingNote = {
       index: hit.index,
       noteRef: hit.noteRef,
       mode: hit.mode || 'pitch',
       startDuration: Math.max(0.03, Number(hit.noteRef.duration) || 0.12),
       startStartTime: Math.max(0, Number(hit.noteRef.startTime) || 0),
-      startClientY: clientY,
+      startMidi: clampMidi(hit.noteRef.note),
+      startClientY: localY,
+      targets: snapshots,
       changed: false,
     };
     this.hoverNoteIndex = hit.index;
@@ -1116,7 +1407,7 @@ class PianoRoll {
     };
 
     this.notes.push(note);
-    this.selectedNoteIndex = this.notes.length - 1;
+    this._setSingleSelection(this.notes.length - 1);
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
     this._playNote(note.note);
@@ -1125,70 +1416,87 @@ class PianoRoll {
   }
 
   _deleteNoteAtIndex(index) {
-    if (!Number.isInteger(index) || index < 0 || index >= this.notes.length) return false;
-
-    this.notes.splice(index, 1);
-
-    if (this.draggingNote) {
-      if (this.draggingNote.index === index) {
-        this.draggingNote = null;
-      } else if (this.draggingNote.index > index) {
-        this.draggingNote.index -= 1;
-      }
-    }
-
-    if (this.hoverNoteIndex === index) this.hoverNoteIndex = -1;
-    if (this.selectedNoteIndex === index) this.selectedNoteIndex = -1;
-    if (this.hoverNoteIndex > index) this.hoverNoteIndex -= 1;
-    if (this.selectedNoteIndex > index) this.selectedNoteIndex -= 1;
-    this.hoverNoteMode = null;
-
-    this._emitNotesMutation();
-    return true;
+    return this._deleteNotesByIndices([index]);
   }
 
   _deleteHoveredOrSelectedNote() {
-    const idx = this.hoverNoteIndex >= 0 ? this.hoverNoteIndex : this.selectedNoteIndex;
-    return this._deleteNoteAtIndex(idx);
+    const idx = this._getActiveNoteIndex();
+    const indices = this._getEditableIndicesForOperations(idx);
+    return this._deleteNotesByIndices(indices);
   }
 
   _getActiveNoteIndex() {
     if (this.hoverNoteIndex >= 0) return this.hoverNoteIndex;
-    if (this.selectedNoteIndex >= 0) return this.selectedNoteIndex;
+    if (this.selectedNoteIndex >= 0 && this.selectedNoteIndex < this.notes.length) return this.selectedNoteIndex;
+    const selected = this._getSelectedIndicesOrdered();
+    if (selected.length) return selected[selected.length - 1];
     return -1;
   }
 
   _duplicateSelectedNote() {
-    const idx = this._getActiveNoteIndex();
-    if (idx < 0 || idx >= this.notes.length) return false;
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
 
-    const source = this.notes[idx];
-    const duration = Math.max(0.03, Number(source.duration) || 0.12);
-    const duplicate = {
-      note: Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(source.note) || MIDI_LO))),
-      startTime: Math.max(0, (Number(source.startTime) || 0) + duration),
-      duration,
-      velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
-    };
+    const notesToCopy = indices.map(index => ({ index, note: this.notes[index] })).filter(item => item.note);
+    if (!notesToCopy.length) return false;
 
-    this.notes.push(duplicate);
-    this.selectedNoteIndex = this.notes.length - 1;
+    let minStart = Number.POSITIVE_INFINITY;
+    let maxEnd = 0;
+    notesToCopy.forEach(item => {
+      const noteStart = Math.max(0, Number(item.note.startTime) || 0);
+      const duration = Math.max(0.03, Number(item.note.duration) || 0.12);
+      minStart = Math.min(minStart, noteStart);
+      maxEnd = Math.max(maxEnd, noteStart + duration);
+    });
+    const shiftSec = Math.max(0.05, maxEnd - minStart);
+
+    const newIndices = [];
+    notesToCopy.forEach(item => {
+      const source = item.note;
+      const duplicate = {
+        note: Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(source.note) || MIDI_LO))),
+        startTime: Math.max(0, (Number(source.startTime) || 0) + shiftSec),
+        duration: Math.max(0.03, Number(source.duration) || 0.12),
+        velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
+      };
+      this.notes.push(duplicate);
+      newIndices.push(this.notes.length - 1);
+    });
+
+    this.selectedNoteIndices.clear();
+    newIndices.forEach(index => this.selectedNoteIndices.add(index));
+    this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
     this._emitNotesMutation();
     return true;
   }
 
-  _updateNoteDrag(clientX, clientY) {
+  _updateNoteDrag(localX, localY) {
     if (!this.draggingNote || !this.draggingNote.noteRef) return;
+    const targets = Array.isArray(this.draggingNote.targets) && this.draggingNote.targets.length
+      ? this.draggingNote.targets
+      : [{
+        index: this.draggingNote.index,
+        noteRef: this.draggingNote.noteRef,
+        startDuration: this.draggingNote.startDuration,
+        startStartTime: this.draggingNote.startStartTime,
+        startMidi: this.draggingNote.startMidi,
+      }];
 
     if (this.draggingNote.mode === 'time') {
       const pps = this._getRollPixelsPerSecond();
-      const deltaSec = (this.draggingNote.startClientY - clientY) / pps;
-      const nextStartTime = Math.max(0, this.draggingNote.startStartTime + deltaSec);
-
-      if (Math.abs(nextStartTime - this.draggingNote.noteRef.startTime) > 0.0001) {
-        this.draggingNote.noteRef.startTime = nextStartTime;
+      const deltaSec = (this.draggingNote.startClientY - localY) / pps;
+      let changed = false;
+      targets.forEach(target => {
+        if (!target.noteRef) return;
+        const nextStartTime = Math.max(0, target.startStartTime + deltaSec);
+        if (Math.abs(nextStartTime - (Number(target.noteRef.startTime) || 0)) > 0.0001) {
+          target.noteRef.startTime = nextStartTime;
+          changed = true;
+        }
+      });
+      if (changed) {
         this.draggingNote.changed = true;
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
@@ -1197,25 +1505,36 @@ class PianoRoll {
 
     if (this.draggingNote.mode === 'duration') {
       const pps = this._getRollPixelsPerSecond();
-      const deltaSec = (this.draggingNote.startClientY - clientY) / pps;
-      const nextDuration = Math.max(0.03, this.draggingNote.startDuration + deltaSec);
-
-      if (Math.abs(nextDuration - this.draggingNote.noteRef.duration) > 0.0001) {
-        this.draggingNote.noteRef.duration = nextDuration;
+      const deltaSec = (this.draggingNote.startClientY - localY) / pps;
+      let changed = false;
+      targets.forEach(target => {
+        if (!target.noteRef) return;
+        const nextDuration = Math.max(0.03, target.startDuration + deltaSec);
+        if (Math.abs(nextDuration - (Number(target.noteRef.duration) || 0)) > 0.0001) {
+          target.noteRef.duration = nextDuration;
+          changed = true;
+        }
+      });
+      if (changed) {
         this.draggingNote.changed = true;
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
       return;
     }
 
-    const rect = this.canvas.getBoundingClientRect();
-    const localX = clientX - rect.left;
     const key = this._keyAtX(localX);
     if (!key) return;
-    const nextMidi = key.midi;
-
-    if (nextMidi !== this.draggingNote.noteRef.note) {
-      this.draggingNote.noteRef.note = nextMidi;
+    const deltaMidi = key.midi - this.draggingNote.startMidi;
+    let changed = false;
+    targets.forEach(target => {
+      if (!target.noteRef) return;
+      const nextMidi = clampMidi(target.startMidi + deltaMidi);
+      if (nextMidi !== target.noteRef.note) {
+        target.noteRef.note = nextMidi;
+        changed = true;
+      }
+    });
+    if (changed) {
       this.draggingNote.changed = true;
       if (this.onNotesChange) this.onNotesChange(this.notes);
     }
@@ -1223,7 +1542,11 @@ class PianoRoll {
 
   _finishNoteDrag(shouldCommit = true) {
     if (!this.draggingNote) return;
-    this.selectedNoteIndex = this.draggingNote.index;
+    if (!this._isSelected(this.draggingNote.index)) {
+      this._setSingleSelection(this.draggingNote.index);
+    } else {
+      this.selectedNoteIndex = this.draggingNote.index;
+    }
     const changed = Boolean(this.draggingNote.changed);
     this.draggingNote = null;
     this.hoverNoteMode = null;
@@ -1250,7 +1573,7 @@ class PianoRoll {
 
   _bindEvents() {
     const c = this.canvas;
-    const xy = e => { const r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    const xy = e => this._localPointFromEvent(e);
     const press = m => { if (!this.pressedKeys.has(m)) { this.pressedKeys.add(m); this._playNote(m); } };
     const release = m => { this.pressedKeys.delete(m); };
     const releaseAll = () => { this.pressedKeys.clear(); };
@@ -1261,11 +1584,19 @@ class PianoRoll {
         if (this.editMode && !this.isPlaying && y < this.H - KEY_H) {
           const hit = this._hitNote(x, y);
           if (hit) {
+            if (e.metaKey || e.ctrlKey) {
+              this._toggleSelection(hit.index);
+              this.hoverNoteIndex = hit.index;
+              this.hoverNoteMode = hit.mode;
+              this._setCursor(y, hit.mode);
+              return;
+            }
+            if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
             if (e.shiftKey) hit.mode = 'time';
-            this._startNoteDrag(hit, e.clientY);
+            this._startNoteDrag(hit, y);
             return;
           }
-          this.selectedNoteIndex = -1;
+          if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
         }
         const k = this._hitTest(x, y);
         if (k) press(k.midi);
@@ -1273,7 +1604,7 @@ class PianoRoll {
       mm: e => {
         const { x, y } = xy(e);
         if (this.draggingNote) {
-          this._updateNoteDrag(e.clientX, e.clientY);
+          this._updateNoteDrag(x, y);
           this._setCursor(y, this.draggingNote.mode);
           return;
         }
@@ -1299,7 +1630,8 @@ class PianoRoll {
       },
       wm: e => {
         if (!this.draggingNote) return;
-        this._updateNoteDrag(e.clientX, e.clientY);
+        const { x, y } = xy(e);
+        this._updateNoteDrag(x, y);
       },
       wu: () => { this._finishNoteDrag(); releaseAll(); },
       wb: () => { this._finishNoteDrag(); releaseAll(); this.canvas.style.cursor = 'default'; },
@@ -1318,18 +1650,50 @@ class PianoRoll {
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
-        this.selectedNoteIndex = hit.index;
-        this._deleteNoteAtIndex(hit.index);
+        if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
+        this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
         if (!this.editMode || this.isPlaying) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+          if (e.shiftKey) {
+            if (this.onRedoRequest) this.onRedoRequest();
+          } else if (this.onUndoRequest) {
+            this.onUndoRequest();
+          }
+          e.preventDefault();
+          return;
+        }
+        if ((e.ctrlKey && (e.key === 'y' || e.key === 'Y')) || ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'z' || e.key === 'Z'))) {
+          if (this.onRedoRequest) this.onRedoRequest();
+          e.preventDefault();
+          return;
+        }
+
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+          this.selectedNoteIndices.clear();
+          for (let i = 0; i < this.notes.length; i += 1) this.selectedNoteIndices.add(i);
+          this.selectedNoteIndex = this.notes.length ? this.notes.length - 1 : -1;
+          this.hoverNoteIndex = this.selectedNoteIndex;
+          e.preventDefault();
+          return;
+        }
+
         if (e.key === 'Delete' || e.key === 'Backspace') {
           if (this._deleteHoveredOrSelectedNote()) {
             e.preventDefault();
           }
+          return;
+        }
+
+        if (e.key === 'Escape') {
+          this._clearSelection();
+          this.hoverNoteIndex = -1;
+          this.hoverNoteMode = null;
+          e.preventDefault();
           return;
         }
 
@@ -1340,52 +1704,77 @@ class PianoRoll {
           return;
         }
 
-        const idx = this._getActiveNoteIndex();
-        if (idx < 0 || idx >= this.notes.length) return;
-        const note = this.notes[idx];
+        const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+        if (!indices.length) return;
         let changed = false;
 
-        if (e.key === 'ArrowRight') {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
           const step = e.shiftKey ? 12 : 1;
-          const next = Math.min(MIDI_HI, Math.round(Number(note.note) || MIDI_LO) + step);
-          if (next !== note.note) {
-            note.note = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowLeft') {
-          const step = e.shiftKey ? 12 : 1;
-          const next = Math.max(MIDI_LO, Math.round(Number(note.note) || MIDI_LO) - step);
-          if (next !== note.note) {
-            note.note = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowUp') {
+          const delta = e.key === 'ArrowRight' ? step : -step;
+          indices.forEach(index => {
+            const note = this.notes[index];
+            if (!note) return;
+            const next = clampMidi((Number(note.note) || MIDI_LO) + delta);
+            if (next !== note.note) {
+              note.note = next;
+              changed = true;
+            }
+          });
+        } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0, (Number(note.startTime) || 0) + step);
-          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
-            note.startTime = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowDown') {
-          const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0, (Number(note.startTime) || 0) - step);
-          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
-            note.startTime = next;
-            changed = true;
-          }
+          const delta = e.key === 'ArrowUp' ? step : -step;
+          indices.forEach(index => {
+            const note = this.notes[index];
+            if (!note) return;
+            const next = Math.max(0, (Number(note.startTime) || 0) + delta);
+            if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
+              note.startTime = next;
+              changed = true;
+            }
+          });
         }
 
         if (changed) {
-          this.selectedNoteIndex = idx;
-          this.hoverNoteIndex = idx;
+          this.selectedNoteIndex = indices[indices.length - 1];
+          this.hoverNoteIndex = this.selectedNoteIndex;
           this.hoverNoteMode = 'pitch';
           this._emitNotesMutation();
           e.preventDefault();
         }
       },
-      ts: e => { e.preventDefault(); releaseAll(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) press(k.midi); }); },
-      tm: e => { e.preventDefault(); releaseAll(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) press(k.midi); }); },
-      te: e => { e.preventDefault(); const still = new Set(); Array.from(e.touches).forEach(t => { const r = c.getBoundingClientRect(); const k = this._hitTest(t.clientX - r.left, t.clientY - r.top); if (k) still.add(k.midi); }); this.pressedKeys.forEach(m => { if (!still.has(m)) release(m); }); },
+      ts: e => {
+        e.preventDefault();
+        releaseAll();
+        Array.from(e.touches).forEach(t => {
+          const p = this._localPointFromEvent(t);
+          const k = this._hitTest(p.x, p.y);
+          if (k) press(k.midi);
+        });
+      },
+      tm: e => {
+        e.preventDefault();
+        releaseAll();
+        Array.from(e.touches).forEach(t => {
+          const p = this._localPointFromEvent(t);
+          const k = this._hitTest(p.x, p.y);
+          if (k) press(k.midi);
+        });
+      },
+      te: e => {
+        e.preventDefault();
+        const still = new Set();
+        Array.from(e.touches).forEach(t => {
+          const p = this._localPointFromEvent(t);
+          const k = this._hitTest(p.x, p.y);
+          if (k) still.add(k.midi);
+        });
+        this.pressedKeys.forEach(m => { if (!still.has(m)) release(m); });
+      },
+      hs: () => {
+        if (!this.scrollHost) return;
+        const maxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+        this.scrollRatio = maxScroll > 0 ? (this.scrollHost.scrollLeft / maxScroll) : 0;
+      },
     };
     c.addEventListener('mousedown', this._h.md);
     c.addEventListener('mousemove', this._h.mm);
@@ -1396,6 +1785,7 @@ class PianoRoll {
     c.addEventListener('touchstart', this._h.ts, { passive: false });
     c.addEventListener('touchmove', this._h.tm, { passive: false });
     c.addEventListener('touchend', this._h.te, { passive: false });
+    this.scrollHost.addEventListener('scroll', this._h.hs, { passive: true });
     window.addEventListener('mousemove', this._h.wm);
     window.addEventListener('mouseup', this._h.wu);
     window.addEventListener('blur', this._h.wb);
@@ -1406,13 +1796,29 @@ class PianoRoll {
     cancelAnimationFrame(this.animId);
     this.lastTs = null;
     const dpr = window.devicePixelRatio || 1;
-    const W = this.container.clientWidth || 800;
+    const viewportW = this.container.clientWidth || 800;
     const H = this.container.clientHeight || 330;
-    this.W = W; this.H = H;
-    this.canvas.width = W * dpr; this.canvas.height = H * dpr;
-    this.canvas.style.width = W + 'px'; this.canvas.style.height = H + 'px';
+    const W = Math.max(viewportW, Math.round(viewportW * this.zoomX));
+    this.viewportW = viewportW;
+    this.W = W;
+    this.H = H;
+
+    this.scrollHost.classList.toggle('scroll-x', this.zoomX > 1.02);
+    this.canvas.width = W * dpr;
+    this.canvas.height = H * dpr;
+    this.canvas.style.width = `${W}px`;
+    this.canvas.style.height = `${H}px`;
+
+    const nextMaxScroll = Math.max(0, W - viewportW);
+    if (nextMaxScroll > 0) {
+      this.scrollHost.scrollLeft = Math.round(nextMaxScroll * this.scrollRatio);
+    } else {
+      this.scrollHost.scrollLeft = 0;
+      this.scrollRatio = 0;
+    }
+
     const ctx = this.canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.keys = this._buildKeys(W);
     const loop = ts => {
       if (this.lastTs !== null) {
@@ -1446,7 +1852,8 @@ class PianoRoll {
   }
 
   _draw(ctx, W, H, time) {
-    const ROLL_H = H - KEY_H, PPS = ROLL_H / 3.5;
+    const ROLL_H = H - KEY_H;
+    const PPS = this._getRollPixelsPerSecond();
     const km = new Map(this.keys.map(k => [k.midi, k]));
     const active = new Set();
     this.notes.forEach(n => { if (time >= n.startTime && time < n.startTime + n.duration) active.add(n.note); });
@@ -1469,7 +1876,7 @@ class PianoRoll {
 
       this.noteHitboxes.push({ index, x, y, w, h, noteRef: n });
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
-      const selected = selectedByDrag || (!this.draggingNote && this.selectedNoteIndex === index);
+      const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const hoverMode = hovered ? this.hoverNoteMode : null;
       const selectedMode = selectedByDrag && this.draggingNote ? this.draggingNote.mode : null;
@@ -1614,12 +2021,31 @@ class PianoRoll {
 
   setTime(t) { this.currentTime = t; }
   setPlaying(p) { this.isPlaying = p; }
+  setZoom(x, y) {
+    const nextX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
+    const nextY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
+    const changed = Math.abs(nextX - this.zoomX) > 0.0001 || Math.abs(nextY - this.zoomY) > 0.0001;
+    if (!changed) return;
+
+    if (this.scrollHost) {
+      const oldMaxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+      this.scrollRatio = oldMaxScroll > 0 ? (this.scrollHost.scrollLeft / oldMaxScroll) : 0;
+    }
+
+    this.zoomX = nextX;
+    this.zoomY = nextY;
+    if (this.container && this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+      this._setup();
+    }
+  }
   setEditMode(enabled) {
-    this.editMode = Boolean(enabled);
+    const next = Boolean(enabled);
+    if (next === this.editMode) return;
+    this.editMode = next;
     this.hoverNoteIndex = -1;
-    this.selectedNoteIndex = -1;
     this.hoverNoteMode = null;
-    if (!this.editMode) this._finishNoteDrag();
+    if (!this.editMode) this._finishNoteDrag(false);
+    this._clearSelection();
   }
 
   destroy() {
@@ -1635,13 +2061,14 @@ class PianoRoll {
     c.removeEventListener('touchstart', this._h.ts);
     c.removeEventListener('touchmove', this._h.tm);
     c.removeEventListener('touchend', this._h.te);
+    this.scrollHost.removeEventListener('scroll', this._h.hs);
     window.removeEventListener('mousemove', this._h.wm);
     window.removeEventListener('mouseup', this._h.wu);
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
     this._finishNoteDrag(false);
     this.pressedKeys.clear();
-    c.remove();
+    this.scrollHost.remove();
   }
 }
 
@@ -1652,24 +2079,116 @@ class ScoreEditor {
     this.editMode = Boolean(options.editMode);
     this.onNotesChange = typeof options.onNotesChange === 'function' ? options.onNotesChange : null;
     this.onEditCommit = typeof options.onEditCommit === 'function' ? options.onEditCommit : null;
+    this.onUndoRequest = typeof options.onUndoRequest === 'function' ? options.onUndoRequest : null;
+    this.onRedoRequest = typeof options.onRedoRequest === 'function' ? options.onRedoRequest : null;
     this.currentTime = 0;
     this.isPlaying = false;
     this.hoverNoteIndex = -1;
     this.selectedNoteIndex = -1;
+    this.selectedNoteIndices = new Set();
     this.draggingNote = null;
     this.noteHitboxes = [];
     this.layout = null;
+    this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
+    this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.animId = 0;
 
     this.container.style.overflow = 'hidden';
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'display:block;width:100%;height:100%;';
     this.container.appendChild(this.canvas);
+    this.setZoom(this.zoomX, this.zoomY);
 
     this._ro = new ResizeObserver(() => this._setup());
     this._ro.observe(container);
     this._setup();
     this._bindEvents();
+  }
+
+  _localPointFromEvent(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (this.W / Math.max(1, rect.width));
+    const y = (e.clientY - rect.top) * (this.H / Math.max(1, rect.height));
+    return { x, y };
+  }
+
+  _isSelected(index) {
+    return this.selectedNoteIndices.has(index);
+  }
+
+  _setSingleSelection(index) {
+    this.selectedNoteIndices.clear();
+    if (Number.isInteger(index) && index >= 0 && index < this.notes.length) {
+      this.selectedNoteIndices.add(index);
+      this.selectedNoteIndex = index;
+    } else {
+      this.selectedNoteIndex = -1;
+    }
+  }
+
+  _toggleSelection(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= this.notes.length) return;
+    if (this.selectedNoteIndices.has(index)) {
+      this.selectedNoteIndices.delete(index);
+      this.selectedNoteIndex = this.selectedNoteIndices.size
+        ? Array.from(this.selectedNoteIndices).sort((a, b) => a - b)[this.selectedNoteIndices.size - 1]
+        : -1;
+      return;
+    }
+    this.selectedNoteIndices.add(index);
+    this.selectedNoteIndex = index;
+  }
+
+  _clearSelection() {
+    this.selectedNoteIndices.clear();
+    this.selectedNoteIndex = -1;
+  }
+
+  _getSelectedIndicesOrdered() {
+    return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
+  }
+
+  _getEditableIndicesForOperations(activeIndex = -1) {
+    const selected = this._getSelectedIndicesOrdered();
+    if (selected.length) return selected;
+    if (Number.isInteger(activeIndex) && activeIndex >= 0 && activeIndex < this.notes.length) return [activeIndex];
+    return [];
+  }
+
+  _deleteNotesByIndices(indices) {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const unique = Array.from(new Set(indices))
+      .filter(index => Number.isInteger(index) && index >= 0 && index < this.notes.length)
+      .sort((a, b) => b - a);
+    if (!unique.length) return false;
+
+    unique.forEach(index => {
+      this.notes.splice(index, 1);
+    });
+
+    this.draggingNote = null;
+    this.hoverNoteIndex = -1;
+    this._clearSelection();
+    this._emitNotesChange();
+    this._emitNotesCommit();
+    return true;
+  }
+
+  getSelectionTimeRange() {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return null;
+    let minStart = Number.POSITIVE_INFINITY;
+    let maxEnd = 0;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const start = Math.max(0, Number(note.startTime) || 0);
+      const duration = Math.max(0.03, Number(note.duration) || 0.12);
+      minStart = Math.min(minStart, start);
+      maxEnd = Math.max(maxEnd, start + duration);
+    });
+    if (!Number.isFinite(minStart) || maxEnd <= minStart) return null;
+    return { start: minStart, end: maxEnd };
   }
 
   _noteColor(midi) {
@@ -1690,14 +2209,49 @@ class ScoreEditor {
     return Math.max(4, notesEnd + 0.5);
   }
 
+  _getClosestNoteSeparationSec() {
+    if (!Array.isArray(this.notes) || this.notes.length < 2) return 0.12;
+
+    const starts = this.notes
+      .map(note => Math.max(0, Number(note.startTime) || 0))
+      .sort((a, b) => a - b);
+
+    let minDelta = Number.POSITIVE_INFINITY;
+    for (let i = 1; i < starts.length; i += 1) {
+      const delta = starts[i] - starts[i - 1];
+      if (delta > 0.0005 && delta < minDelta) minDelta = delta;
+    }
+
+    if (!Number.isFinite(minDelta)) {
+      let shortestDuration = Number.POSITIVE_INFINITY;
+      for (const note of this.notes) {
+        const duration = Math.max(0.03, Number(note.duration) || 0.12);
+        if (duration < shortestDuration) shortestDuration = duration;
+      }
+      minDelta = Number.isFinite(shortestDuration) ? (shortestDuration * 0.5) : 0.12;
+    }
+
+    return Math.min(1.2, Math.max(0.08, minDelta));
+  }
+
   _buildLayout(W, H) {
-    const left = 76;
+    const left = 94;
     const right = 22;
     const usableW = Math.max(120, W - left - right);
     const totalDuration = this._getTotalDuration();
-    const pxPerSec = usableW / totalDuration;
+    const basePxPerSec = usableW / totalDuration;
+    const closestSeparationSec = this._getClosestNoteSeparationSec();
+    const targetGapPx = Math.max(12, Math.min(20, W * 0.018));
+    const adaptivePxPerSec = targetGapPx / closestSeparationSec;
+    const maxAdaptivePxPerSec = basePxPerSec * 1.65;
+    const baseSpacingPxPerSec = Math.min(maxAdaptivePxPerSec, Math.max(basePxPerSec, adaptivePxPerSec));
+    const pxPerSec = baseSpacingPxPerSec * this.zoomX;
+    const playheadX = left + (usableW * 0.34);
+    const visiblePastSec = (playheadX - left) / pxPerSec;
+    const visibleFutureSec = ((W - right) - playheadX) / pxPerSec;
 
-    const lineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
+    const baseLineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
+    const lineGap = Math.max(8, Math.min(24, baseLineGap * this.zoomY));
     const staffSpan = lineGap * 10;
     const staffTop = Math.max(16, (H - staffSpan) / 2);
     const yE4 = staffTop + lineGap * 4;
@@ -1708,7 +2262,11 @@ class ScoreEditor {
       right,
       usableW,
       totalDuration,
+      closestSeparationSec,
       pxPerSec,
+      playheadX,
+      visiblePastSec,
+      visibleFutureSec,
       lineGap,
       staffTop,
       yE4,
@@ -1726,12 +2284,13 @@ class ScoreEditor {
   }
 
   _timeToX(time, layout) {
-    return layout.left + Math.max(0, Number(time) || 0) * layout.pxPerSec;
+    const resolvedTime = Math.max(0, Number(time) || 0);
+    return layout.playheadX + (resolvedTime - this.currentTime) * layout.pxPerSec;
   }
 
   _timeAtX(x, layout) {
     const clamped = Math.max(layout.left, Math.min(this.W - layout.right, x));
-    return Math.max(0, (clamped - layout.left) / layout.pxPerSec);
+    return Math.max(0, this.currentTime + ((clamped - layout.playheadX) / layout.pxPerSec));
   }
 
   _midiAtY(y, layout) {
@@ -1760,25 +2319,45 @@ class ScoreEditor {
 
   _getActiveNoteIndex() {
     if (this.hoverNoteIndex >= 0) return this.hoverNoteIndex;
-    if (this.selectedNoteIndex >= 0) return this.selectedNoteIndex;
+    if (this.selectedNoteIndex >= 0 && this.selectedNoteIndex < this.notes.length) return this.selectedNoteIndex;
+    const selected = this._getSelectedIndicesOrdered();
+    if (selected.length) return selected[selected.length - 1];
     return -1;
   }
 
   _duplicateSelectedNote() {
-    const idx = this._getActiveNoteIndex();
-    if (idx < 0 || idx >= this.notes.length) return false;
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
 
-    const source = this.notes[idx];
-    const duration = Math.max(0.03, Number(source.duration) || 0.12);
-    const duplicate = {
-      note: clampMidi(source.note),
-      startTime: Math.max(0, (Number(source.startTime) || 0) + duration),
-      duration,
-      velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
-    };
+    const notesToCopy = indices.map(index => ({ index, note: this.notes[index] })).filter(item => item.note);
+    if (!notesToCopy.length) return false;
 
-    this.notes.push(duplicate);
-    this.selectedNoteIndex = this.notes.length - 1;
+    let minStart = Number.POSITIVE_INFINITY;
+    let maxEnd = 0;
+    notesToCopy.forEach(item => {
+      const noteStart = Math.max(0, Number(item.note.startTime) || 0);
+      const duration = Math.max(0.03, Number(item.note.duration) || 0.12);
+      minStart = Math.min(minStart, noteStart);
+      maxEnd = Math.max(maxEnd, noteStart + duration);
+    });
+    const shiftSec = Math.max(0.05, maxEnd - minStart);
+
+    const newIndices = [];
+    notesToCopy.forEach(item => {
+      const source = item.note;
+      const duplicate = {
+        note: clampMidi(source.note),
+        startTime: Math.max(0, (Number(source.startTime) || 0) + shiftSec),
+        duration: Math.max(0.03, Number(source.duration) || 0.12),
+        velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
+      };
+      this.notes.push(duplicate);
+      newIndices.push(this.notes.length - 1);
+    });
+
+    this.selectedNoteIndices.clear();
+    newIndices.forEach(index => this.selectedNoteIndices.add(index));
+    this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
     this._emitNotesCommit();
@@ -1786,29 +2365,13 @@ class ScoreEditor {
   }
 
   _deleteNoteAtIndex(index) {
-    if (!Number.isInteger(index) || index < 0 || index >= this.notes.length) return false;
-
-    this.notes.splice(index, 1);
-    if (this.draggingNote) {
-      if (this.draggingNote.index === index) {
-        this.draggingNote = null;
-      } else if (this.draggingNote.index > index) {
-        this.draggingNote.index -= 1;
-      }
-    }
-    if (this.hoverNoteIndex === index) this.hoverNoteIndex = -1;
-    if (this.selectedNoteIndex === index) this.selectedNoteIndex = -1;
-    if (this.hoverNoteIndex > index) this.hoverNoteIndex -= 1;
-    if (this.selectedNoteIndex > index) this.selectedNoteIndex -= 1;
-
-    this._emitNotesChange();
-    this._emitNotesCommit();
-    return true;
+    return this._deleteNotesByIndices([index]);
   }
 
   _deleteHoveredOrSelectedNote() {
     const idx = this._getActiveNoteIndex();
-    return this._deleteNoteAtIndex(idx);
+    const indices = this._getEditableIndicesForOperations(idx);
+    return this._deleteNotesByIndices(indices);
   }
 
   _addNoteAt(x, y) {
@@ -1821,7 +2384,7 @@ class ScoreEditor {
     };
 
     this.notes.push(note);
-    this.selectedNoteIndex = this.notes.length - 1;
+    this._setSingleSelection(this.notes.length - 1);
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
     this._emitNotesCommit();
@@ -1852,18 +2415,32 @@ class ScoreEditor {
     this.canvas.style.cursor = hit.mode === 'duration' ? 'ew-resize' : 'move';
   }
 
-  _startDrag(hit, clientX, clientY) {
+  _startDrag(hit, localX, localY) {
     if (!hit || !hit.noteRef) return false;
-    this.selectedNoteIndex = hit.index;
+    const targetIndices = this._isSelected(hit.index)
+      ? this._getEditableIndicesForOperations(hit.index)
+      : [hit.index];
+    if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
+    const snapshots = targetIndices.map(index => {
+      const note = this.notes[index];
+      return {
+        index,
+        noteRef: note,
+        startStartTime: Math.max(0, Number(note?.startTime) || 0),
+        startDuration: Math.max(0.03, Number(note?.duration) || 0.12),
+        startMidi: clampMidi(note?.note),
+      };
+    });
     this.draggingNote = {
       index: hit.index,
       noteRef: hit.noteRef,
       mode: hit.mode || 'note',
-      startClientX: clientX,
-      startClientY: clientY,
+      startClientX: localX,
+      startClientY: localY,
       startStartTime: Math.max(0, Number(hit.noteRef.startTime) || 0),
       startDuration: Math.max(0.03, Number(hit.noteRef.duration) || 0.12),
       startMidi: clampMidi(hit.noteRef.note),
+      targets: snapshots,
       changed: false,
     };
     this.hoverNoteIndex = hit.index;
@@ -1871,34 +2448,54 @@ class ScoreEditor {
     return true;
   }
 
-  _updateDrag(clientX, clientY) {
+  _updateDrag(localX, localY) {
     if (!this.draggingNote || !this.draggingNote.noteRef || !this.layout) return;
+    const targets = Array.isArray(this.draggingNote.targets) && this.draggingNote.targets.length
+      ? this.draggingNote.targets
+      : [{
+        index: this.draggingNote.index,
+        noteRef: this.draggingNote.noteRef,
+        startStartTime: this.draggingNote.startStartTime,
+        startDuration: this.draggingNote.startDuration,
+        startMidi: this.draggingNote.startMidi,
+      }];
 
     if (this.draggingNote.mode === 'duration') {
-      const deltaSec = (clientX - this.draggingNote.startClientX) / this.layout.pxPerSec;
-      const nextDuration = Math.max(0.03, this.draggingNote.startDuration + deltaSec);
-      if (Math.abs(nextDuration - (Number(this.draggingNote.noteRef.duration) || 0)) > 0.0001) {
-        this.draggingNote.noteRef.duration = nextDuration;
+      const deltaSec = (localX - this.draggingNote.startClientX) / this.layout.pxPerSec;
+      let changed = false;
+      targets.forEach(target => {
+        if (!target.noteRef) return;
+        const nextDuration = Math.max(0.03, target.startDuration + deltaSec);
+        if (Math.abs(nextDuration - (Number(target.noteRef.duration) || 0)) > 0.0001) {
+          target.noteRef.duration = nextDuration;
+          changed = true;
+        }
+      });
+      if (changed) {
         this.draggingNote.changed = true;
         this._emitNotesChange();
       }
       return;
     }
 
-    const deltaSec = (clientX - this.draggingNote.startClientX) / this.layout.pxPerSec;
-    const nextStart = Math.max(0, this.draggingNote.startStartTime + deltaSec);
-    const pitchDelta = Math.round((this.draggingNote.startClientY - clientY) / this.layout.pitchStepPx);
-    const nextMidi = clampMidi(this.draggingNote.startMidi + pitchDelta);
-
+    const deltaSec = (localX - this.draggingNote.startClientX) / this.layout.pxPerSec;
+    const pitchDelta = Math.round((this.draggingNote.startClientY - localY) / this.layout.pitchStepPx);
     let changed = false;
-    if (Math.abs(nextStart - (Number(this.draggingNote.noteRef.startTime) || 0)) > 0.0001) {
-      this.draggingNote.noteRef.startTime = nextStart;
-      changed = true;
-    }
-    if (nextMidi !== this.draggingNote.noteRef.note) {
-      this.draggingNote.noteRef.note = nextMidi;
-      changed = true;
-    }
+
+    targets.forEach(target => {
+      if (!target.noteRef) return;
+      const targetStart = Math.max(0, target.startStartTime + deltaSec);
+      const targetMidi = clampMidi(target.startMidi + pitchDelta);
+      if (Math.abs(targetStart - (Number(target.noteRef.startTime) || 0)) > 0.0001) {
+        target.noteRef.startTime = targetStart;
+        changed = true;
+      }
+      if (targetMidi !== target.noteRef.note) {
+        target.noteRef.note = targetMidi;
+        changed = true;
+      }
+    });
+
     if (changed) {
       this.draggingNote.changed = true;
       this._emitNotesChange();
@@ -1908,7 +2505,11 @@ class ScoreEditor {
   _finishDrag(commit = true) {
     if (!this.draggingNote) return;
     const changed = Boolean(this.draggingNote.changed);
-    this.selectedNoteIndex = this.draggingNote.index;
+    if (!this._isSelected(this.draggingNote.index)) {
+      this._setSingleSelection(this.draggingNote.index);
+    } else {
+      this.selectedNoteIndex = this.draggingNote.index;
+    }
     this.draggingNote = null;
     this._setCursor(null);
     if (commit && changed) this._emitNotesCommit();
@@ -1961,10 +2562,14 @@ class ScoreEditor {
     staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
     staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
     ctx.fillStyle = staffGlow;
-    ctx.fillRect(layout.left - 8, layout.topY, layout.usableW + 16, layout.bottomY - layout.topY);
+    ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
 
     const totalSec = layout.totalDuration;
-    for (let sec = 0; sec <= totalSec; sec += 1) {
+    const visibleStartSec = Math.max(0, this.currentTime - layout.visiblePastSec - 1);
+    const visibleEndSec = Math.min(totalSec, this.currentTime + layout.visibleFutureSec + 1);
+    const firstSec = Math.floor(visibleStartSec);
+    const lastSec = Math.ceil(visibleEndSec);
+    for (let sec = firstSec; sec <= lastSec; sec += 1) {
       const x = this._timeToX(sec, layout);
       const isBar = sec % 4 === 0;
       ctx.strokeStyle = isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)';
@@ -2000,12 +2605,18 @@ class ScoreEditor {
     ctx.lineTo(layout.left - 12, bracketBottom);
     ctx.stroke();
 
+    const trebleY = this._stepToY(34, layout);
+    const bassY = this._stepToY(22, layout);
     ctx.fillStyle = 'rgba(221,214,254,0.82)';
-    ctx.font = '700 12px "Times New Roman", Georgia, serif';
-    ctx.fillText('Treble', 16, this._stepToY(34, layout) + 4);
-    ctx.fillText('Bass', 16, this._stepToY(22, layout) + 4);
+    ctx.font = `${Math.max(34, Math.round(layout.lineGap * 3.8))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
+    ctx.fillText('𝄞', layout.left - 54, trebleY + (layout.lineGap * 1.6));
+    ctx.font = `${Math.max(28, Math.round(layout.lineGap * 3.0))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
+    ctx.fillText('𝄢', layout.left - 52, bassY + (layout.lineGap * 1.25));
+    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
+    ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
 
-    const playheadX = this._timeToX(this.currentTime, layout);
+    const playheadX = layout.playheadX;
     ctx.strokeStyle = this.isPlaying ? 'rgba(110,231,183,0.85)' : 'rgba(167,139,250,0.5)';
     ctx.lineWidth = this.isPlaying ? 1.8 : 1.2;
     ctx.beginPath();
@@ -2024,7 +2635,7 @@ class ScoreEditor {
       if (x > W + 20 || tailX < layout.left - 20 || y < layout.topY - 26 || y > layout.bottomY + 26) return;
 
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
-      const selected = selectedByDrag || (!this.draggingNote && this.selectedNoteIndex === index);
+      const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const isLive = this.isPlaying && this.currentTime >= (Number(note.startTime) || 0) && this.currentTime < ((Number(note.startTime) || 0) + duration);
 
@@ -2045,20 +2656,6 @@ class ScoreEditor {
       ctx.beginPath();
       ctx.arc(tailX, y, selected ? 4.2 : 3.4, 0, Math.PI * 2);
       ctx.fill();
-
-      const stemUp = step < 34;
-      const stemLen = layout.lineGap * 2.3;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      if (stemUp) {
-        ctx.moveTo(x + layout.noteHeadW * 0.45, y);
-        ctx.lineTo(x + layout.noteHeadW * 0.45, y - stemLen);
-      } else {
-        ctx.moveTo(x - layout.noteHeadW * 0.42, y);
-        ctx.lineTo(x - layout.noteHeadW * 0.42, y + stemLen);
-      }
-      ctx.stroke();
 
       ctx.save();
       ctx.translate(x, y);
@@ -2105,10 +2702,7 @@ class ScoreEditor {
 
   _bindEvents() {
     const c = this.canvas;
-    const xy = e => {
-      const r = c.getBoundingClientRect();
-      return { x: e.clientX - r.left, y: e.clientY - r.top };
-    };
+    const xy = e => this._localPointFromEvent(e);
 
     this._h = {
       md: e => {
@@ -2116,15 +2710,22 @@ class ScoreEditor {
         const { x, y } = xy(e);
         const hit = this._hitNote(x, y);
         if (hit) {
-          this._startDrag(hit, e.clientX, e.clientY);
+          if (e.metaKey || e.ctrlKey) {
+            this._toggleSelection(hit.index);
+            this.hoverNoteIndex = hit.index;
+            this._setCursor(hit);
+            return;
+          }
+          if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
+          this._startDrag(hit, x, y);
           return;
         }
-        this.selectedNoteIndex = -1;
+        if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
       },
       mm: e => {
         const { x, y } = xy(e);
         if (this.draggingNote) {
-          this._updateDrag(e.clientX, e.clientY);
+          this._updateDrag(x, y);
           this._setCursor(this.draggingNote);
           return;
         }
@@ -2142,7 +2743,8 @@ class ScoreEditor {
       },
       wm: e => {
         if (!this.draggingNote) return;
-        this._updateDrag(e.clientX, e.clientY);
+        const { x, y } = xy(e);
+        this._updateDrag(x, y);
       },
       wu: () => {
         this._finishDrag(true);
@@ -2164,16 +2766,48 @@ class ScoreEditor {
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
-        this.selectedNoteIndex = hit.index;
-        this._deleteNoteAtIndex(hit.index);
+        if (!this._isSelected(hit.index)) this._setSingleSelection(hit.index);
+        this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
         if (!this.editMode || this.isPlaying) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+          if (e.shiftKey) {
+            if (this.onRedoRequest) this.onRedoRequest();
+          } else if (this.onUndoRequest) {
+            this.onUndoRequest();
+          }
+          e.preventDefault();
+          return;
+        }
+        if ((e.ctrlKey && (e.key === 'y' || e.key === 'Y')) || ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'z' || e.key === 'Z'))) {
+          if (this.onRedoRequest) this.onRedoRequest();
+          e.preventDefault();
+          return;
+        }
+
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+          this.selectedNoteIndices.clear();
+          for (let i = 0; i < this.notes.length; i += 1) this.selectedNoteIndices.add(i);
+          this.selectedNoteIndex = this.notes.length ? this.notes.length - 1 : -1;
+          this.hoverNoteIndex = this.selectedNoteIndex;
+          e.preventDefault();
+          return;
+        }
+
         if (e.key === 'Delete' || e.key === 'Backspace') {
           if (this._deleteHoveredOrSelectedNote()) e.preventDefault();
+          return;
+        }
+
+        if (e.key === 'Escape') {
+          this._clearSelection();
+          this.hoverNoteIndex = -1;
+          this._setCursor(null);
+          e.preventDefault();
           return;
         }
 
@@ -2182,58 +2816,51 @@ class ScoreEditor {
           return;
         }
 
-        const idx = this._getActiveNoteIndex();
-        if (idx < 0 || idx >= this.notes.length) return;
-        const note = this.notes[idx];
+        const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+        if (!indices.length) return;
         let changed = false;
 
-        if (e.key === 'ArrowUp') {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           const step = e.shiftKey ? 12 : 1;
-          const next = clampMidi((Number(note.note) || MIDI_LO) + step);
-          if (next !== note.note) {
-            note.note = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowDown') {
-          const step = e.shiftKey ? 12 : 1;
-          const next = clampMidi((Number(note.note) || MIDI_LO) - step);
-          if (next !== note.note) {
-            note.note = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowRight') {
+          const delta = e.key === 'ArrowUp' ? step : -step;
+          indices.forEach(index => {
+            const note = this.notes[index];
+            if (!note) return;
+            const next = clampMidi((Number(note.note) || MIDI_LO) + delta);
+            if (next !== note.note) {
+              note.note = next;
+              changed = true;
+            }
+          });
+        } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
           const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0, (Number(note.startTime) || 0) + step);
-          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
-            note.startTime = next;
-            changed = true;
-          }
-        } else if (e.key === 'ArrowLeft') {
+          const delta = e.key === 'ArrowRight' ? step : -step;
+          indices.forEach(index => {
+            const note = this.notes[index];
+            if (!note) return;
+            const next = Math.max(0, (Number(note.startTime) || 0) + delta);
+            if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
+              note.startTime = next;
+              changed = true;
+            }
+          });
+        } else if (e.key === ']' || e.key === '[') {
           const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0, (Number(note.startTime) || 0) - step);
-          if (Math.abs(next - (Number(note.startTime) || 0)) > 0.0001) {
-            note.startTime = next;
-            changed = true;
-          }
-        } else if (e.key === ']') {
-          const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0.03, (Number(note.duration) || 0.12) + step);
-          if (Math.abs(next - (Number(note.duration) || 0)) > 0.0001) {
-            note.duration = next;
-            changed = true;
-          }
-        } else if (e.key === '[') {
-          const step = e.shiftKey ? 0.25 : 0.1;
-          const next = Math.max(0.03, (Number(note.duration) || 0.12) - step);
-          if (Math.abs(next - (Number(note.duration) || 0)) > 0.0001) {
-            note.duration = next;
-            changed = true;
-          }
+          const delta = e.key === ']' ? step : -step;
+          indices.forEach(index => {
+            const note = this.notes[index];
+            if (!note) return;
+            const next = Math.max(0.03, (Number(note.duration) || 0.12) + delta);
+            if (Math.abs(next - (Number(note.duration) || 0)) > 0.0001) {
+              note.duration = next;
+              changed = true;
+            }
+          });
         }
 
         if (changed) {
-          this.selectedNoteIndex = idx;
-          this.hoverNoteIndex = idx;
+          this.selectedNoteIndex = indices[indices.length - 1];
+          this.hoverNoteIndex = this.selectedNoteIndex;
           this._emitNotesChange();
           this._emitNotesCommit();
           e.preventDefault();
@@ -2264,6 +2891,7 @@ class ScoreEditor {
     this.canvas.height = H * dpr;
     this.canvas.style.width = `${W}px`;
     this.canvas.style.height = `${H}px`;
+    this.setZoom(this.zoomX, this.zoomY);
     const ctx = this.canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const loop = () => {
@@ -2281,11 +2909,22 @@ class ScoreEditor {
     this.isPlaying = Boolean(playing);
   }
 
+  setZoom(x, y) {
+    this.zoomX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
+    this.zoomY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
+    if (this.canvas) {
+      this.canvas.style.transformOrigin = 'center center';
+      this.canvas.style.transform = 'none';
+    }
+  }
+
   setEditMode(enabled) {
-    this.editMode = Boolean(enabled);
+    const next = Boolean(enabled);
+    if (next === this.editMode) return;
+    this.editMode = next;
     this.hoverNoteIndex = -1;
-    this.selectedNoteIndex = -1;
     if (!this.editMode) this._finishDrag(false);
+    this._clearSelection();
     this._setCursor(null);
   }
 
@@ -2454,6 +3093,182 @@ function destroyInstances() {
   state.midiPlaying = false;
 }
 
+function _renderEditGuideOverlay(isScoreView) {
+  const commonTopics = [
+    {
+      title: 'Playback Controls',
+      details: [
+        '<strong>Space:</strong> toggles play/pause from the current cursor time (it does not reset).',
+        '<strong>Arrow Left/Right:</strong> seek the transport by 0.5 seconds.',
+        '<strong>Shift + Arrow Left/Right:</strong> seek by 2 seconds for faster navigation.',
+        '<strong>Edit mode rule:</strong> if notes are selected, arrows edit notes; clear selection to seek transport.',
+      ],
+    },
+    {
+      title: 'Undo / Redo',
+      details: [
+        '<strong>Cmd/Ctrl + Z:</strong> undo the most recent committed note edit.',
+        '<strong>Shift + Cmd/Ctrl + Z:</strong> redo the latest undone edit.',
+        '<strong>Ctrl + Y:</strong> alternative redo shortcut.',
+        '<strong>History scope:</strong> add, delete, drag, duplicate and keyboard note moves/resizes.',
+      ],
+    },
+    {
+      title: 'Multi-select',
+      details: [
+        '<strong>Cmd/Ctrl + Click:</strong> add or remove notes from selection.',
+        '<strong>Cmd/Ctrl + A:</strong> select all editable notes in the current view.',
+        '<strong>Delete / Backspace:</strong> remove every selected note at once.',
+        '<strong>Cmd/Ctrl + D and arrows:</strong> duplicate or move the full selection together.',
+      ],
+    },
+    {
+      title: 'Zoom',
+      details: [
+        '<strong>X controls:</strong> horizontal zoom out / reset / in.',
+        '<strong>Y controls:</strong> vertical zoom out / reset / in.',
+        '<strong>Saved per view:</strong> roll uses rollZoomX/rollZoomY and score uses scoreZoomX/scoreZoomY.',
+      ],
+    },
+  ];
+
+  const modeTopics = isScoreView
+    ? [
+      {
+        title: 'Pitch',
+        details: [
+          '<strong>Drag note up/down:</strong> moves pitch by staff position.',
+          '<strong>Arrow Up/Down:</strong> move selected notes by semitone.',
+          '<strong>Shift + Arrow Up/Down:</strong> move by octave.',
+        ],
+      },
+      {
+        title: 'Time',
+        details: [
+          '<strong>Drag note left/right:</strong> moves start time without changing duration.',
+          '<strong>Arrow Left/Right:</strong> nudge selected notes in time.',
+          '<strong>Shift + Arrow Left/Right:</strong> larger time step.',
+        ],
+      },
+      {
+        title: 'Duration',
+        details: [
+          '<strong>Drag right tail:</strong> change note length.',
+          '<strong>[ / ]:</strong> shorten or lengthen selected notes.',
+          '<strong>Shift + [ / ]:</strong> larger duration step.',
+        ],
+      },
+      {
+        title: 'Add',
+        details: [
+          '<strong>Double click empty staff space:</strong> creates a note at that pitch and time.',
+        ],
+      },
+      {
+        title: 'Delete',
+        details: [
+          '<strong>Delete / Backspace:</strong> remove selected note(s).',
+          '<strong>Right click:</strong> remove hovered note quickly.',
+        ],
+      },
+      {
+        title: 'Duplicate',
+        details: [
+          '<strong>Cmd/Ctrl + D:</strong> copy selected note(s) to the next rhythmic slot.',
+        ],
+      },
+    ]
+    : [
+      {
+        title: 'Pitch',
+        details: [
+          '<strong>Drag left/right:</strong> changes pitch lane in the roll.',
+          '<strong>Arrow Left/Right:</strong> move selected note pitch by semitone.',
+          '<strong>Shift + Arrow Left/Right:</strong> move by octave.',
+        ],
+      },
+      {
+        title: 'Time',
+        details: [
+          '<strong>Shift + Drag:</strong> move note in time while keeping pitch fixed.',
+          '<strong>Arrow Up/Down:</strong> nudge selected notes in time.',
+          '<strong>Shift + Arrow Up/Down:</strong> larger time step.',
+        ],
+      },
+      {
+        title: 'Duration',
+        details: [
+          '<strong>Drag top edge up/down:</strong> resize note duration.',
+        ],
+      },
+      {
+        title: 'Add',
+        details: [
+          '<strong>Double click empty roll space:</strong> create a new note.',
+        ],
+      },
+      {
+        title: 'Delete',
+        details: [
+          '<strong>Delete / Backspace:</strong> remove selected note(s).',
+          '<strong>Right click:</strong> remove hovered note quickly.',
+        ],
+      },
+      {
+        title: 'Duplicate',
+        details: [
+          '<strong>Cmd/Ctrl + D:</strong> duplicate selected note(s) forward in time.',
+        ],
+      },
+    ];
+
+  const topics = [...commonTopics, ...modeTopics];
+  const viewLabel = isScoreView ? 'Score Editing Guide' : 'Roll Editing Guide';
+
+  return `
+    <div class="w-edit-help-overlay">
+      <div class="w-edit-help-overlay-head">
+        <span class="w-edit-help-overlay-title">${viewLabel}</span>
+        <span class="w-edit-help-overlay-hint">Hover a title to see full controls</span>
+      </div>
+      <div class="w-edit-help-topics">
+        ${topics.map(topic => `
+          <div class="w-guide-topic" tabindex="0">
+            <span class="w-guide-topic-title">${topic.title}</span>
+            <div class="w-guide-tooltip">
+              <p class="w-guide-tooltip-title">${topic.title}</p>
+              ${topic.details.map(detail => `<p>${detail}</p>`).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function _syncGuideOverlay(content) {
+  if (!content) return;
+  const wrap = content.querySelector('.w-piano-wrap');
+  const body = content.querySelector('#piano-body');
+  if (!wrap || !body) return;
+
+  const shouldShow = state.noteEditMode && state.stage === 'ready' && state.noteGuideOpen;
+  const existing = wrap.querySelector('.w-edit-help-overlay');
+
+  if (!shouldShow) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const isScoreView = state.noteEditorView === 'score';
+  const overlayHtml = _renderEditGuideOverlay(isScoreView);
+  if (existing) {
+    existing.outerHTML = overlayHtml;
+  } else {
+    body.insertAdjacentHTML('beforebegin', overlayHtml);
+  }
+}
+
 function renderDashboard(content) {
   destroyInstances();
   const aM = state.selectedModel;
@@ -2463,9 +3278,13 @@ function renderDashboard(content) {
   const canEditNotes = state.noteEditMode && state.stage === 'ready';
   const activeEditorView = canEditNotes ? state.noteEditorView : 'roll';
   const isScoreView = activeEditorView === 'score';
+  const activeZoomX = isScoreView ? state.scoreZoomX : state.rollZoomX;
+  const activeZoomY = isScoreView ? state.scoreZoomY : state.rollZoomY;
+  const canUndo = _notesUndoStack.length > 0;
+  const canRedo = _notesRedoStack.length > 0;
 
   content.innerHTML = `
-    <div class="w-dashboard">
+    <div class="w-dashboard${canEditNotes ? ' editing-focus' : ''}">
       <div class="w-top-grid">
 
         <!-- Audio Input -->
@@ -2596,6 +3415,11 @@ function renderDashboard(content) {
             >
               ${state.noteEditMode ? 'Editing On' : 'Edit Notes'}
             </button>
+            ${canEditNotes ? `
+              <button class="w-note-guide-btn ${state.noteGuideOpen ? 'active' : ''}" id="guide-toggle">
+                ${state.noteGuideOpen ? 'Hide Guide' : 'Show Guide'}
+              </button>
+            ` : ''}
             <div id="piano-status">
               ${state.midiPlaying
                 ? `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`
@@ -2606,79 +3430,30 @@ function renderDashboard(content) {
           </div>
         </div>
         ${state.noteEditMode && state.stage === 'ready' ? `
-          <div class="w-edit-help">
-            <div class="w-edit-help-head">
-              <div style="width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 10px rgba(167,139,250,0.8);"></div>
-              <p>${isScoreView ? 'Score Editing Guide' : 'Roll Editing Guide'}</p>
+          <div class="w-edit-tools">
+            <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>Undo</button>
+            <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>Redo</button>
+            <div class="w-edit-zoom">
+              <span class="w-edit-zoom-label">X</span>
+              <button class="w-edit-tool-btn" id="zoom-x-out">-</button>
+              <button class="w-edit-tool-btn" id="zoom-x-reset">${activeZoomX.toFixed(2)}x</button>
+              <button class="w-edit-tool-btn" id="zoom-x-in">+</button>
             </div>
-            <div class="w-edit-help-grid">
-              ${isScoreView ? `
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Pitch</p>
-                  <p class="w-edit-help-desc">Move note pitch up or down on the staff.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Drag note U/D</span><span class="w-keycap">Arrow Up/Down</span><span class="w-keycap">Shift + Arrow = Octave</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Time</p>
-                  <p class="w-edit-help-desc">Move note timing left or right in the bar.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Drag note L/R</span><span class="w-keycap">Arrow Left/Right</span><span class="w-keycap">Shift + Arrow = Large Step</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Duration</p>
-                  <p class="w-edit-help-desc">Drag the right tail handle to resize note length.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Tail handle</span><span class="w-keycap">[ / ]</span><span class="w-keycap">Shift + [ / ]</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Add</p>
-                  <p class="w-edit-help-desc">Create a note directly on the staff at that time.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Double click</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Delete</p>
-                  <p class="w-edit-help-desc">Remove selected or hovered note from score.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Delete</span><span class="w-keycap">Right click</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Duplicate</p>
-                  <p class="w-edit-help-desc">Duplicate active note to the next slot.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Cmd/Ctrl</span><span class="w-keycap">+ D</span></div>
-                </div>
-              ` : `
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Pitch</p>
-                  <p class="w-edit-help-desc">Change note pitch left or right.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Drag L/R</span><span class="w-keycap">Arrow Left/Right</span><span class="w-keycap">Shift + Arrow = Octave</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Time</p>
-                  <p class="w-edit-help-desc">Move note timing without changing pitch.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Shift + Drag</span><span class="w-keycap">Arrow Up/Down</span><span class="w-keycap">Shift + Arrow = Large Step</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Duration</p>
-                  <p class="w-edit-help-desc">Drag the top edge up or down.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Top edge</span><span class="w-keycap">U / D</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Add</p>
-                  <p class="w-edit-help-desc">Create a new note in empty roll space.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Double click</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Delete</p>
-                  <p class="w-edit-help-desc">Remove selected or hovered note.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Delete</span><span class="w-keycap">Right click</span></div>
-                </div>
-                <div class="w-edit-help-card">
-                  <p class="w-edit-help-title">Duplicate</p>
-                  <p class="w-edit-help-desc">Duplicate active note to the next slot.</p>
-                  <div class="w-keycaps"><span class="w-keycap">Cmd/Ctrl</span><span class="w-keycap">+ D</span></div>
-                </div>
-              `}
+            <div class="w-edit-zoom">
+              <span class="w-edit-zoom-label">Y</span>
+              <button class="w-edit-tool-btn" id="zoom-y-out">-</button>
+              <button class="w-edit-tool-btn" id="zoom-y-reset">${activeZoomY.toFixed(2)}x</button>
+              <button class="w-edit-tool-btn" id="zoom-y-in">+</button>
             </div>
           </div>
         ` : ''}
+        ${state.noteEditMode && state.stage === 'ready' && state.noteGuideOpen ? _renderEditGuideOverlay(isScoreView) : ''}
         <div class="w-piano-body" id="piano-body"></div>
+        ${isScoreView ? `
+          <div class="w-score-disclaimer">
+            <strong>Score disclaimer:</strong> this is not a professional engraving score. It is designed only for interactive note editing.
+          </div>
+        ` : ''}
       </div>
     </div>`;
 
@@ -2690,19 +3465,15 @@ function renderDashboard(content) {
   if (pianoBody) {
     const editorOptions = {
       editMode: state.noteEditMode && state.stage === 'ready',
+      zoomX: isScoreView ? state.scoreZoomX : state.rollZoomX,
+      zoomY: isScoreView ? state.scoreZoomY : state.rollZoomY,
+      onUndoRequest: () => _undoNoteEdit(content),
+      onRedoRequest: () => _redoNoteEdit(content),
       onNotesChange: notes => {
         if (state.stage === 'ready') state.midiNotes = notes;
       },
       onEditCommit: notes => {
-        if (state.stage === 'ready') state.midiNotes = notes;
-        const rebuilt = _rebuildMidiBlobFromEditedNotes();
-        setStatusMessage(
-          rebuilt
-            ? 'MIDI notes updated. Playback and MIDI export were refreshed.'
-            : 'MIDI notes updated for playback, but MIDI export refresh failed.',
-          rebuilt ? 'success' : 'error'
-        );
-        renderDashboard(content);
+        _applyEditorNotesCommit(content, notes);
       },
     };
 
@@ -2710,11 +3481,13 @@ function renderDashboard(content) {
       _scoreEditor = new ScoreEditor(pianoBody, rollNotes, editorOptions);
       _scoreEditor.setTime(state.midiTime);
       _scoreEditor.setPlaying(state.midiPlaying);
+      _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
       _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
       _pianoRoll.setTime(state.midiTime);
       _pianoRoll.setPlaying(state.midiPlaying);
+      _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
       _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
     }
   }
@@ -2777,6 +3550,47 @@ function renderDashboard(content) {
     );
     renderDashboard(content);
   });
+
+  const updateEditorZoom = (axis, action) => {
+    if (state.midiPlaying) return;
+    const key = isScoreView
+      ? (axis === 'x' ? 'scoreZoomX' : 'scoreZoomY')
+      : (axis === 'x' ? 'rollZoomX' : 'rollZoomY');
+    const step = axis === 'x' ? 0.14 : 0.12;
+    let next = Number(state[key]) || 1;
+    if (action === 'in') next += step;
+    else if (action === 'out') next -= step;
+    else next = 1;
+    next = Math.max(0.6, Math.min(2.4, Math.round(next * 100) / 100));
+    state[key] = next;
+    if (isScoreView && _scoreEditor) _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
+    if (!isScoreView && _pianoRoll) _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
+    _syncEditToolbar(content);
+  };
+
+  content.querySelector('#edit-undo')?.addEventListener('click', () => {
+    if (state.midiPlaying) return;
+    _undoNoteEdit(content);
+    _syncEditToolbar(content);
+  });
+  content.querySelector('#edit-redo')?.addEventListener('click', () => {
+    if (state.midiPlaying) return;
+    _redoNoteEdit(content);
+    _syncEditToolbar(content);
+  });
+  content.querySelector('#guide-toggle')?.addEventListener('click', () => {
+    state.noteGuideOpen = !state.noteGuideOpen;
+    persistGuideOpen(state.noteGuideOpen);
+    _syncEditToolbar(content);
+    _syncGuideOverlay(content);
+  });
+  content.querySelector('#zoom-x-in')?.addEventListener('click', () => updateEditorZoom('x', 'in'));
+  content.querySelector('#zoom-x-out')?.addEventListener('click', () => updateEditorZoom('x', 'out'));
+  content.querySelector('#zoom-x-reset')?.addEventListener('click', () => updateEditorZoom('x', 'reset'));
+  content.querySelector('#zoom-y-in')?.addEventListener('click', () => updateEditorZoom('y', 'in'));
+  content.querySelector('#zoom-y-out')?.addEventListener('click', () => updateEditorZoom('y', 'out'));
+  content.querySelector('#zoom-y-reset')?.addEventListener('click', () => updateEditorZoom('y', 'reset'));
+
   content.querySelector('#midi-seek').addEventListener('input', e => {
     state.midiTime = parseFloat(e.target.value);
     if (_pianoRoll) _pianoRoll.setTime(state.midiTime);
@@ -2786,6 +3600,7 @@ function renderDashboard(content) {
     }
     _updateSeek(content);
   });
+  _syncEditToolbar(content);
 }
 
 function _updateSeek(content) {
@@ -2820,6 +3635,61 @@ function _updateSeek(content) {
   }
 }
 
+function _nudgeTransport(content, deltaSec) {
+  if (!content || state.stage !== 'ready') return;
+  const duration = getMidiDuration();
+  const next = Math.max(0, Math.min(duration, (Number(state.midiTime) || 0) + deltaSec));
+  if (Math.abs(next - (Number(state.midiTime) || 0)) <= 0.0001) return;
+  state.midiTime = next;
+  if (state.midiPlaying) {
+    scheduleNativePlayback(state.midiTime);
+  }
+  _updateSeek(content);
+}
+
+function _handleTransportShortcuts(e) {
+  if (state.page !== 'dashboard') return;
+  const active = document.activeElement;
+  if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
+  if (active && active.isContentEditable) return;
+
+  const content = document.getElementById('w-content');
+  if (!content) return;
+
+  if (e.code === 'Space') {
+    if (state.stage !== 'ready') return;
+    e.preventDefault();
+    _midiPlayPause(content);
+    return;
+  }
+
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (state.stage !== 'ready') return;
+    if (state.noteEditMode && !state.midiPlaying) {
+      const activeEditor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
+      const hasSelection = activeEditor && typeof activeEditor.getSelectionTimeRange === 'function'
+        ? Boolean(activeEditor.getSelectionTimeRange())
+        : false;
+      if (hasSelection) return;
+    }
+    e.preventDefault();
+    const baseStep = e.shiftKey ? 2 : 0.5;
+    _nudgeTransport(content, e.key === 'ArrowRight' ? baseStep : -baseStep);
+  }
+}
+
+function bindTransportShortcuts() {
+  if (_transportKeysBound) return;
+  _transportKeysBound = true;
+  window.addEventListener('keydown', _handleTransportShortcuts);
+}
+
+function unbindTransportShortcuts() {
+  if (!_transportKeysBound) return;
+  _transportKeysBound = false;
+  window.removeEventListener('keydown', _handleTransportShortcuts);
+}
+
 function _midiTick(content) {
   if (!state.midiPlaying) return;
   const t = _nativeStartOffset + ((performance.now() - _nativeStartPerf) / 1000);
@@ -2850,6 +3720,7 @@ async function _midiPlayPause(content) {
       btn.innerHTML = ICON.play(20, 'white');
       btn.style.boxShadow = `0 0 15px rgba(139,92,246,0.4)`;
     }
+    _syncEditToolbar(content);
     return;
   }
 
@@ -2881,6 +3752,7 @@ async function _midiPlayPause(content) {
       btn.style.boxShadow = `0 0 30px rgba(139,92,246,0.7)`;
     }
     _updateSeek(content);
+    _syncEditToolbar(content);
   };
 
   // If already running start immediately, otherwise resume then start
@@ -2906,6 +3778,7 @@ function _midiStop(content) {
   _updateSeek(content);
   const btn = content.querySelector('#midi-play');
   if (btn) btn.innerHTML = ICON.play(20,'white');
+  _syncEditToolbar(content);
 }
 
 function _downloadMidi() {
@@ -2971,11 +3844,12 @@ async function _applyMidiBlob(midiBlob, successMessage) {
   state.stage = 'ready';
   state.progress = 0;
   state.midiTime = 0;
+  _resetEditHistory();
   setStatusMessage(successMessage, 'success');
 }
 
 function _rebuildMidiBlobFromEditedNotes() {
-  if (!window.Midi || !state.midiNotes.length) return false;
+  if (!window.Midi) return false;
 
   try {
     const midi = new window.Midi();
@@ -3541,6 +4415,7 @@ export function init(container) {
   injectCSS(container);
   container.className = 'widi-app';
   bindAudioUnlock();
+  bindTransportShortcuts();
   persistSelectedModel(state.selectedModel);
 
   // Background glow orbs
@@ -3597,6 +4472,7 @@ export function init(container) {
   // Cleanup on unmount
   return () => {
     destroyInstances();
+    unbindTransportShortcuts();
     if (_recTimer) clearTimeout(_recTimer);
     if (_progressTimer) clearInterval(_progressTimer);
     if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
