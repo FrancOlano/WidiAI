@@ -933,9 +933,6 @@ function injectCSS(container) {
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
 .w-fade-in{animation:fadeIn 0.25s ease;}
 
-@media (max-width: 1320px){
-  .w-top-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
-}
 @media (max-width: 1040px){
   .w-top-grid{grid-template-columns:minmax(0,1fr);}
   .w-piano-wrap.edit-mode{height:clamp(690px,96vh,860px);min-height:690px;}
@@ -1690,12 +1687,45 @@ class ScoreEditor {
     return Math.max(4, notesEnd + 0.5);
   }
 
+  _getClosestNoteSeparationSec() {
+    if (!Array.isArray(this.notes) || this.notes.length < 2) return 0.12;
+
+    const starts = this.notes
+      .map(note => Math.max(0, Number(note.startTime) || 0))
+      .sort((a, b) => a - b);
+
+    let minDelta = Number.POSITIVE_INFINITY;
+    for (let i = 1; i < starts.length; i += 1) {
+      const delta = starts[i] - starts[i - 1];
+      if (delta > 0.0005 && delta < minDelta) minDelta = delta;
+    }
+
+    if (!Number.isFinite(minDelta)) {
+      let shortestDuration = Number.POSITIVE_INFINITY;
+      for (const note of this.notes) {
+        const duration = Math.max(0.03, Number(note.duration) || 0.12);
+        if (duration < shortestDuration) shortestDuration = duration;
+      }
+      minDelta = Number.isFinite(shortestDuration) ? (shortestDuration * 0.5) : 0.12;
+    }
+
+    return Math.min(1.2, Math.max(0.08, minDelta));
+  }
+
   _buildLayout(W, H) {
-    const left = 76;
+    const left = 94;
     const right = 22;
     const usableW = Math.max(120, W - left - right);
     const totalDuration = this._getTotalDuration();
-    const pxPerSec = usableW / totalDuration;
+    const basePxPerSec = usableW / totalDuration;
+    const closestSeparationSec = this._getClosestNoteSeparationSec();
+    const targetGapPx = Math.max(12, Math.min(20, W * 0.018));
+    const adaptivePxPerSec = targetGapPx / closestSeparationSec;
+    const maxAdaptivePxPerSec = basePxPerSec * 1.65;
+    const pxPerSec = Math.min(maxAdaptivePxPerSec, Math.max(basePxPerSec, adaptivePxPerSec));
+    const playheadX = left + (usableW * 0.34);
+    const visiblePastSec = (playheadX - left) / pxPerSec;
+    const visibleFutureSec = ((W - right) - playheadX) / pxPerSec;
 
     const lineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
     const staffSpan = lineGap * 10;
@@ -1708,7 +1738,11 @@ class ScoreEditor {
       right,
       usableW,
       totalDuration,
+      closestSeparationSec,
       pxPerSec,
+      playheadX,
+      visiblePastSec,
+      visibleFutureSec,
       lineGap,
       staffTop,
       yE4,
@@ -1726,12 +1760,13 @@ class ScoreEditor {
   }
 
   _timeToX(time, layout) {
-    return layout.left + Math.max(0, Number(time) || 0) * layout.pxPerSec;
+    const resolvedTime = Math.max(0, Number(time) || 0);
+    return layout.playheadX + (resolvedTime - this.currentTime) * layout.pxPerSec;
   }
 
   _timeAtX(x, layout) {
     const clamped = Math.max(layout.left, Math.min(this.W - layout.right, x));
-    return Math.max(0, (clamped - layout.left) / layout.pxPerSec);
+    return Math.max(0, this.currentTime + ((clamped - layout.playheadX) / layout.pxPerSec));
   }
 
   _midiAtY(y, layout) {
@@ -1961,10 +1996,14 @@ class ScoreEditor {
     staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
     staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
     ctx.fillStyle = staffGlow;
-    ctx.fillRect(layout.left - 8, layout.topY, layout.usableW + 16, layout.bottomY - layout.topY);
+    ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
 
     const totalSec = layout.totalDuration;
-    for (let sec = 0; sec <= totalSec; sec += 1) {
+    const visibleStartSec = Math.max(0, this.currentTime - layout.visiblePastSec - 1);
+    const visibleEndSec = Math.min(totalSec, this.currentTime + layout.visibleFutureSec + 1);
+    const firstSec = Math.floor(visibleStartSec);
+    const lastSec = Math.ceil(visibleEndSec);
+    for (let sec = firstSec; sec <= lastSec; sec += 1) {
       const x = this._timeToX(sec, layout);
       const isBar = sec % 4 === 0;
       ctx.strokeStyle = isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)';
@@ -2000,12 +2039,18 @@ class ScoreEditor {
     ctx.lineTo(layout.left - 12, bracketBottom);
     ctx.stroke();
 
+    const trebleY = this._stepToY(34, layout);
+    const bassY = this._stepToY(22, layout);
     ctx.fillStyle = 'rgba(221,214,254,0.82)';
-    ctx.font = '700 12px "Times New Roman", Georgia, serif';
-    ctx.fillText('Treble', 16, this._stepToY(34, layout) + 4);
-    ctx.fillText('Bass', 16, this._stepToY(22, layout) + 4);
+    ctx.font = `${Math.max(34, Math.round(layout.lineGap * 3.8))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
+    ctx.fillText('𝄞', layout.left - 54, trebleY + (layout.lineGap * 1.6));
+    ctx.font = `${Math.max(28, Math.round(layout.lineGap * 3.0))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
+    ctx.fillText('𝄢', layout.left - 52, bassY + (layout.lineGap * 1.25));
+    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
+    ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
 
-    const playheadX = this._timeToX(this.currentTime, layout);
+    const playheadX = layout.playheadX;
     ctx.strokeStyle = this.isPlaying ? 'rgba(110,231,183,0.85)' : 'rgba(167,139,250,0.5)';
     ctx.lineWidth = this.isPlaying ? 1.8 : 1.2;
     ctx.beginPath();
@@ -2045,20 +2090,6 @@ class ScoreEditor {
       ctx.beginPath();
       ctx.arc(tailX, y, selected ? 4.2 : 3.4, 0, Math.PI * 2);
       ctx.fill();
-
-      const stemUp = step < 34;
-      const stemLen = layout.lineGap * 2.3;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      if (stemUp) {
-        ctx.moveTo(x + layout.noteHeadW * 0.45, y);
-        ctx.lineTo(x + layout.noteHeadW * 0.45, y - stemLen);
-      } else {
-        ctx.moveTo(x - layout.noteHeadW * 0.42, y);
-        ctx.lineTo(x - layout.noteHeadW * 0.42, y + stemLen);
-      }
-      ctx.stroke();
 
       ctx.save();
       ctx.translate(x, y);
@@ -2696,13 +2727,10 @@ function renderDashboard(content) {
       onEditCommit: notes => {
         if (state.stage === 'ready') state.midiNotes = notes;
         const rebuilt = _rebuildMidiBlobFromEditedNotes();
-        setStatusMessage(
-          rebuilt
-            ? 'MIDI notes updated. Playback and MIDI export were refreshed.'
-            : 'MIDI notes updated for playback, but MIDI export refresh failed.',
-          rebuilt ? 'success' : 'error'
-        );
-        renderDashboard(content);
+        if (!rebuilt) {
+          console.warn('MIDI notes changed, but MIDI export refresh failed.');
+        }
+        _updateSeek(content);
       },
     };
 
