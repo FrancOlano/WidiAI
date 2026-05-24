@@ -341,6 +341,8 @@ const state = {
   noteGuideOpen: storedGuideOpen,
   noteHistoryOpen: false,
   scoreReadableMode: false,
+  fingerSuggestionMode: false,
+  fingerSuggestionLevel: 'beginner',
   rollZoomX: 1,
   rollZoomY: 1,
   scoreZoomX: 1,
@@ -457,6 +459,9 @@ function _cloneNotes(notes) {
     startTime: Math.max(0, Number(note.startTime) || 0),
     duration: Math.max(0.03, Number(note.duration) || 0.12),
     velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+    ...(Number.isInteger(Number(note.fingerOverride)) && Number(note.fingerOverride) >= 1 && Number(note.fingerOverride) <= 5
+      ? { fingerOverride: Math.round(Number(note.fingerOverride)) }
+      : {}),
   }));
 }
 
@@ -469,7 +474,9 @@ function _notesEqual(a, b) {
       na.note !== nb.note ||
       Math.abs((na.startTime || 0) - (nb.startTime || 0)) > 0.0001 ||
       Math.abs((na.duration || 0) - (nb.duration || 0)) > 0.0001 ||
-      na.velocity !== nb.velocity
+      na.velocity !== nb.velocity ||
+      (Number.isFinite(Number(na.fingerOverride)) ? Math.round(Number(na.fingerOverride)) : 0) !==
+      (Number.isFinite(Number(nb.fingerOverride)) ? Math.round(Number(nb.fingerOverride)) : 0)
     ) {
       return false;
     }
@@ -638,6 +645,11 @@ function _syncEditToolbar(content) {
     historyToggle.classList.toggle('active', state.noteHistoryOpen);
     historyToggle.textContent = state.noteHistoryOpen ? 'Hide History' : 'History';
   }
+  const fingerToggle = content.querySelector('#finger-suggest-toggle');
+  if (fingerToggle) {
+    fingerToggle.classList.toggle('active', state.fingerSuggestionMode);
+    fingerToggle.textContent = state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels';
+  }
   const readableToggle = content.querySelector('#score-readable-toggle');
   if (readableToggle) {
     readableToggle.classList.toggle('active', state.scoreReadableMode);
@@ -652,6 +664,9 @@ function _syncEditToolbar(content) {
   ['#zoom-x-in', '#zoom-x-out', '#zoom-x-reset', '#zoom-y-in', '#zoom-y-out', '#zoom-y-reset'].forEach(selector => {
     const button = content.querySelector(selector);
     if (button) button.disabled = playbackLocked;
+  });
+  content.querySelectorAll('[data-finger-set]').forEach(button => {
+    button.disabled = playbackLocked;
   });
 
   if (state.noteHistoryOpen) _syncHistoryOverlay(content);
@@ -675,6 +690,8 @@ function resetMidiData() {
   state.noteEditorView = 'roll';
   state.noteHistoryOpen = false;
   state.scoreReadableMode = false;
+  state.fingerSuggestionMode = false;
+  state.fingerSuggestionLevel = 'beginner';
   state.rollZoomX = 1;
   state.rollZoomY = 1;
   state.scoreZoomX = 1;
@@ -1236,7 +1253,16 @@ function injectCSS(container) {
 .w-note-guide-btn:hover:not(:disabled){background:rgba(59,130,246,0.14);border-color:rgba(59,130,246,0.34);color:#bfdbfe;}
 .w-note-guide-btn:disabled{opacity:0.45;cursor:not-allowed;}
 .w-note-guide-btn.active{background:rgba(59,130,246,0.2);border-color:rgba(59,130,246,0.44);color:#dbeafe;box-shadow:0 0 12px rgba(59,130,246,0.2);}
+.w-finger-suggest-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
+.w-finger-suggest-btn:hover:not(:disabled){background:rgba(245,158,11,0.14);border-color:rgba(245,158,11,0.34);color:#fde68a;}
+.w-finger-suggest-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-finger-suggest-btn.active{background:rgba(245,158,11,0.22);border-color:rgba(245,158,11,0.45);color:#fef3c7;box-shadow:0 0 12px rgba(245,158,11,0.2);}
+.w-finger-level-switch{display:flex;align-items:center;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
+.w-finger-level-btn{border:none;border-radius:7px;padding:5px 9px;background:transparent;color:#9ca3af;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;transition:all 0.2s;}
+.w-finger-level-btn:hover{background:rgba(255,255,255,0.06);color:#d1d5db;}
+.w-finger-level-btn.active{background:linear-gradient(135deg,rgba(245,158,11,0.34),rgba(251,191,36,0.3));color:#fef3c7;box-shadow:0 0 12px rgba(251,191,36,0.2);}
 .w-edit-tools{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(12,12,22,0.7),rgba(10,10,18,0.55));}
+.w-finger-quick{display:flex;align-items:center;gap:5px;padding:4px 7px;border-radius:8px;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.08);}
 .w-edit-tool-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid rgba(255,255,255,0.12);border-radius:7px;background:rgba(255,255,255,0.04);color:#d1d5db;padding:5px 9px;font-size:10px;font-weight:700;letter-spacing:0.03em;cursor:pointer;transition:all 0.2s;}
 .w-edit-tool-btn:hover{background:rgba(139,92,246,0.16);border-color:rgba(139,92,246,0.38);}
 .w-edit-tool-btn:disabled{opacity:0.35;cursor:not-allowed;}
@@ -1419,6 +1445,481 @@ function midiToDiatonicStep(midi) {
   return octave * 7 + STEP_BY_PC[pc];
 }
 
+function normalizeFingerSuggestionLevel(level) {
+  return String(level || '').trim().toLowerCase() === 'advanced' ? 'advanced' : 'beginner';
+}
+
+function normalizeFingerOverride(rawFinger) {
+  const finger = Math.round(Number(rawFinger));
+  if (!Number.isFinite(finger)) return 0;
+  if (finger < 1 || finger > 5) return 0;
+  return finger;
+}
+
+function _groupNotesByOnset(entries, tolerance = 0.045) {
+  const groups = [];
+  entries.forEach(entry => {
+    const last = groups[groups.length - 1];
+    if (!last || Math.abs(entry.start - last.start) > tolerance) {
+      groups.push({ start: entry.start, notes: [entry] });
+    } else {
+      last.notes.push(entry);
+    }
+  });
+  groups.forEach(group => {
+    group.notes.sort((a, b) => a.midi - b.midi);
+  });
+  return groups;
+}
+
+function _meanMidi(entries, fallback) {
+  if (!Array.isArray(entries) || !entries.length) return fallback;
+  let total = 0;
+  entries.forEach(entry => { total += entry.midi; });
+  return total / entries.length;
+}
+
+function _chooseEventHandSplit(groupNotes, leftCenter, rightCenter, splitMidi, level) {
+  const notes = Array.isArray(groupNotes) ? groupNotes : [];
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  const wideSpan = notes.length > 1 ? (notes[notes.length - 1].midi - notes[0].midi) : 0;
+
+  let best = { cut: 0, cost: Number.POSITIVE_INFINITY };
+  for (let cut = 0; cut <= notes.length; cut += 1) {
+    const left = notes.slice(0, cut);
+    const right = notes.slice(cut);
+    let cost = 0;
+
+    left.forEach(note => {
+      cost += Math.abs(note.midi - leftCenter) * 0.82;
+      cost += Math.max(0, note.midi - (splitMidi + 2)) * (advanced ? 0.9 : 1.3);
+    });
+    right.forEach(note => {
+      cost += Math.abs(note.midi - rightCenter) * 0.82;
+      cost += Math.max(0, (splitMidi - 2) - note.midi) * (advanced ? 0.9 : 1.3);
+    });
+
+    if (left.length > 5 || right.length > 5) cost += 1000;
+    if (wideSpan >= 9 && (!left.length || !right.length)) cost += advanced ? 2.6 : 4.4;
+    if (wideSpan <= 4 && left.length && right.length) cost += advanced ? 0.35 : 0.7;
+
+    if (left.length && right.length) {
+      const topLeft = left[left.length - 1].midi;
+      const lowRight = right[0].midi;
+      cost += Math.max(0, 2 - (lowRight - topLeft)) * (advanced ? 0.6 : 1.0);
+      if ((left.length === 1 || right.length === 1) && wideSpan <= 5) cost += 0.35;
+    }
+
+    if (cost < best.cost) best = { cut, cost };
+  }
+  return best.cut;
+}
+
+function _midiKeyPosCm(midi) {
+  const normalized = clampMidi(midi);
+  const keybSize = 16.5;
+  const k = keybSize / 7.0;
+  const step = (normalized % 12) * k;
+  return keybSize * Math.floor(normalized / 12) + step;
+}
+
+function _buildHandInternalNotes(entries, hand, level) {
+  const notes = [];
+  if (!Array.isArray(entries) || !entries.length) return notes;
+  const groups = _groupNotesByOnset(entries, 0.04);
+  const stagger = normalizeFingerSuggestionLevel(level) === 'advanced' ? 0.035 : 0.05;
+  let chordId = 0;
+  let noteId = 0;
+  const mirror = hand === 'left' ? -1 : 1;
+
+  groups.forEach(group => {
+    const g = group.notes.slice().sort((a, b) => a.midi - b.midi);
+    if (g.length === 1) {
+      const n = g[0];
+      notes.push({
+        index: n.index,
+        noteID: noteId++,
+        pitch: n.midi,
+        x: _midiKeyPosCm(n.midi) * mirror,
+        time: n.start,
+        duration: Math.max(0.03, n.duration),
+        isBlack: BLACK_S.has(n.midi % 12),
+        isChord: false,
+        chordID: -1,
+        chordnr: 0,
+        NinChord: 0,
+        fingering: 0,
+        anchorFinger: n.override || 0,
+      });
+      return;
+    }
+
+    g.forEach((n, idx) => {
+      const offset = stagger * (g.length - idx - 1);
+      notes.push({
+        index: n.index,
+        noteID: noteId++,
+        pitch: n.midi,
+        x: _midiKeyPosCm(n.midi) * mirror,
+        time: n.start - offset,
+        duration: Math.max(0.03, n.duration) + (stagger * (g.length - 1)),
+        isBlack: BLACK_S.has(n.midi % 12),
+        isChord: true,
+        chordID: chordId,
+        chordnr: idx,
+        NinChord: g.length,
+        fingering: 0,
+        anchorFinger: n.override || 0,
+      });
+    });
+    chordId += 1;
+  });
+  return notes;
+}
+
+function _createHandModel(hand, level) {
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  const sizeFactors = { XXS: 0.33, XS: 0.46, S: 0.64, M: 0.82, L: 1.0, XL: 1.1, XXL: 1.2 };
+  const sizeKey = advanced ? 'L' : 'M';
+  const hf = sizeFactors[sizeKey] || sizeFactors.M;
+  const frest = [null, -7.0, -2.8, 0.0, 2.8, 5.6];
+  for (let i = 1; i <= 5; i += 1) frest[i] *= hf;
+  return {
+    LR: hand,
+    hf,
+    frest,
+    weights: [null, 1.1, 1.0, 1.1, 0.9, 0.8],
+    bfactor: [null, 0.3, 1.0, 1.1, 0.8, 0.7],
+    fingers: [1, 2, 3, 4, 5],
+    depth: advanced ? 9 : 7,
+    autodepth: true,
+    preservePostureMemory: false,
+    relocationAlpha: 0.3,
+    hasPositionState: false,
+    maxSpanCm: 21.0 * hf,
+    maxFollowLagCm: 2.5 * hf,
+    minFingerGapCm: 0.15 * hf,
+    fingerPositions: frest.slice(),
+  };
+}
+
+function _relaxedTargets(model, finger, noteX) {
+  const ifx = model.frest[finger];
+  if (ifx == null) return {};
+  const targets = {};
+  for (let j = 1; j <= 5; j += 1) {
+    const jfx = model.frest[j];
+    if (jfx == null) continue;
+    targets[j] = (jfx - ifx) + noteX;
+  }
+  return targets;
+}
+
+function _applyPositionConstraints(model, fingerPositions, activeFinger, noteX, targets) {
+  for (let j = 1; j <= 5; j += 1) {
+    if (j === activeFinger) continue;
+    const pos = fingerPositions[j];
+    const target = targets[j];
+    if (!Number.isFinite(pos) || !Number.isFinite(target)) continue;
+    const lag = pos - target;
+    if (lag > model.maxFollowLagCm) fingerPositions[j] = target + model.maxFollowLagCm;
+    else if (lag < -model.maxFollowLagCm) fingerPositions[j] = target - model.maxFollowLagCm;
+  }
+
+  for (let j = 2; j <= 5; j += 1) {
+    const a = fingerPositions[j - 1];
+    const b = fingerPositions[j];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    const minAllowed = a + model.minFingerGapCm;
+    if (b < minAllowed) fingerPositions[j] = minAllowed;
+  }
+
+  if (Number.isFinite(fingerPositions[1]) && Number.isFinite(fingerPositions[5])) {
+    const span = fingerPositions[5] - fingerPositions[1];
+    if (span > model.maxSpanCm) {
+      const limit = model.maxSpanCm / 2.0;
+      for (let j = 1; j <= 5; j += 1) {
+        if (j === activeFinger || !Number.isFinite(fingerPositions[j])) continue;
+        const off = fingerPositions[j] - noteX;
+        if (off > limit) fingerPositions[j] = noteX + limit;
+        else if (off < -limit) fingerPositions[j] = noteX - limit;
+      }
+    }
+  }
+  fingerPositions[activeFinger] = noteX;
+}
+
+function _setFingerPositions(model, fingering, notes, idx, fingerPositions = model.fingerPositions, forceRelaxed = false) {
+  const fi = fingering[idx];
+  const note = notes[idx];
+  if (!note || !fi) return;
+  const noteX = note.x;
+  const targets = _relaxedTargets(model, fi, noteX);
+  if (!targets || !Object.keys(targets).length) return;
+
+  if (forceRelaxed || !model.preservePostureMemory) {
+    for (let j = 1; j <= 5; j += 1) fingerPositions[j] = Number.isFinite(targets[j]) ? targets[j] : null;
+    fingerPositions[fi] = noteX;
+    if (fingerPositions === model.fingerPositions) model.hasPositionState = true;
+    return;
+  }
+
+  for (let j = 1; j <= 5; j += 1) {
+    const target = targets[j];
+    if (!Number.isFinite(target)) {
+      fingerPositions[j] = null;
+      continue;
+    }
+    if (j === fi) {
+      fingerPositions[j] = noteX;
+      continue;
+    }
+    const prev = fingerPositions[j];
+    if (!Number.isFinite(prev)) fingerPositions[j] = target;
+    else fingerPositions[j] = (model.relocationAlpha * prev) + ((1.0 - model.relocationAlpha) * target);
+  }
+  _applyPositionConstraints(model, fingerPositions, fi, noteX, targets);
+  if (fingerPositions === model.fingerPositions) model.hasPositionState = true;
+}
+
+function _avgVelocity(model, fingering, notes, depth) {
+  const fingerPositions = model.fingerPositions.slice();
+  _setFingerPositions(model, fingering, notes, 0, fingerPositions, false);
+  let vmean = 0;
+  const steps = Math.max(1, depth - 1);
+  for (let i = 1; i < depth; i += 1) {
+    const na = notes[i - 1];
+    const nb = notes[i];
+    const fb = fingering[i];
+    const fingerPos = fingerPositions[fb];
+    if (!na || !nb || !Number.isFinite(fingerPos)) continue;
+    const dx = Math.abs(nb.x - fingerPos);
+    const dt = Math.abs(nb.time - na.time) + 0.1;
+    let v = dx / dt;
+    const weight = model.weights[fb] || 1;
+    if (nb.isBlack) v /= (weight * (model.bfactor[fb] || 1));
+    else v /= weight;
+    vmean += v;
+    _setFingerPositions(model, fingering, notes, i, fingerPositions, false);
+  }
+  return vmean / steps;
+}
+
+function _skipTransition(model, fa, fb, na, nb) {
+  const xba = nb.x - na.x;
+  if (!na.isChord && !nb.isChord) {
+    if (fa === fb && xba !== 0 && na.duration < 4) return true;
+    if (fa > 1) {
+      if (fb > 1 && ((fb - fa) * xba) < 0) return true;
+      if (fb === 1 && nb.isBlack && xba > 0) return true;
+    } else if (na.isBlack && xba < 0 && fb > 1 && na.duration < 2) {
+      return true;
+    }
+  } else if (na.isChord && nb.isChord && na.chordID === nb.chordID) {
+    const axba = (Math.abs(xba) * model.hf) / 0.8;
+    if (fa === fb) return true;
+    if (fa < fb && model.LR === 'left') return true;
+    if (fa > fb && model.LR === 'right') return true;
+    const a = Math.min(fa, fb);
+    const b = Math.max(fa, fb);
+    const thresholds = {
+      '3-4': 5, '4-5': 5, '2-3': 6, '2-4': 7, '3-5': 8, '2-5': 11,
+      '1-2': 12, '1-3': 14, '1-4': 16,
+    };
+    const key = `${a}-${b}`;
+    const limit = thresholds[key];
+    if (Number.isFinite(limit) && axba > limit) return true;
+  }
+  return false;
+}
+
+function _optimizeWindow(model, notes, startFinger, level) {
+  if (!Array.isArray(notes) || !notes.length) return { out: [], vel: 0, depth: 0 };
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  let depth = model.depth;
+
+  if (model.autodepth) {
+    if (notes[0].isChord) {
+      depth = Math.max(3, (notes[0].NinChord - notes[0].chordnr + 1));
+    } else {
+      const t0 = notes[0].time;
+      for (let i = 4; i <= 9; i += 1) {
+        depth = i;
+        if ((notes[i - 1].time - t0) > 3.5) break;
+      }
+    }
+  }
+  depth = Math.max(3, Math.min(depth, advanced ? 9 : 7));
+
+  const uStart = startFinger === 0 ? model.fingers : [startFinger];
+  const candidate = new Array(9).fill(0);
+  let best = new Array(9).fill(0);
+  let minVel = Number.POSITIVE_INFINITY;
+
+  const backtrack = (idx) => {
+    if (idx === depth) {
+      const vel = _avgVelocity(model, candidate, notes, depth);
+      if (vel < minVel) {
+        minVel = vel;
+        best = candidate.slice();
+      }
+      return;
+    }
+    const choices = idx === 0 ? uStart : model.fingers;
+    for (let c = 0; c < choices.length; c += 1) {
+      const finger = choices[c];
+      if (idx > 0 && _skipTransition(model, candidate[idx - 1], finger, notes[idx - 1], notes[idx])) continue;
+      candidate[idx] = finger;
+      backtrack(idx + 1);
+    }
+  };
+  backtrack(0);
+  if (!normalizeFingerOverride(best[0])) {
+    const fallback = normalizeFingerOverride(startFinger) || (model.LR === 'left' ? 5 : 1);
+    best = new Array(9).fill(fallback);
+  }
+  return { out: best, vel: Number.isFinite(minVel) ? minVel : 0, depth };
+}
+
+function _runHandFingering(entries, hand, level, outMap) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  const notes = _buildHandInternalNotes(entries, hand, level);
+  if (!notes.length) return;
+  const model = _createHandModel(hand, level);
+  model.fingerPositions = model.frest.slice();
+  model.hasPositionState = false;
+
+  let startFinger = 0;
+  let out = [];
+  const nTotal = notes.length;
+
+  for (let i = 0; i < nTotal; i += 1) {
+    if (i > nTotal - 11 && model.autodepth) {
+      model.autodepth = false;
+      model.depth = 9;
+    }
+
+    const ninenotes = notes.slice(i, i + 9);
+    if (!ninenotes.length) break;
+    while (ninenotes.length < 9) ninenotes.push(ninenotes[ninenotes.length - 1]);
+
+    const anchor = normalizeFingerOverride(notes[i].anchorFinger);
+    if (anchor) {
+      notes[i].fingering = anchor;
+      const optimized = _optimizeWindow(model, ninenotes, anchor, level);
+      out = optimized.out;
+      startFinger = out.length > 1 ? out[1] : anchor;
+      _setFingerPositions(model, out, ninenotes, 0);
+      continue;
+    }
+
+    let bestFinger = 0;
+    if (i > nTotal - 10) {
+      if (Array.isArray(out) && out.length > 1) {
+        bestFinger = out[1];
+        out = [bestFinger].concat(out.slice(2));
+        startFinger = out.length > 1 ? out[1] : bestFinger;
+      } else {
+        const optimized = _optimizeWindow(model, ninenotes, startFinger, level);
+        out = optimized.out;
+        bestFinger = out[0];
+        startFinger = out.length > 1 ? out[1] : out[0];
+      }
+    } else {
+      const optimized = _optimizeWindow(model, ninenotes, startFinger, level);
+      out = optimized.out;
+      bestFinger = out[0];
+      startFinger = out.length > 1 ? out[1] : out[0];
+    }
+
+    notes[i].fingering = bestFinger;
+    _setFingerPositions(model, out, ninenotes, 0);
+  }
+
+  notes.forEach(n => {
+    const finger = normalizeFingerOverride(n.fingering);
+    if (!finger) return;
+    outMap.set(n.index, { finger, hand });
+  });
+}
+
+function computeFingerSuggestions(notes, level = 'beginner') {
+  const normalizedLevel = normalizeFingerSuggestionLevel(level);
+  const map = new Map();
+  const sourceNotes = Array.isArray(notes) ? notes : [];
+  if (!sourceNotes.length) return { map, splitMidi: 60 };
+
+  const entries = sourceNotes.map((note, index) => {
+    const midi = clampMidi(note.note);
+    return {
+      index,
+      midi,
+      override: normalizeFingerOverride(note.fingerOverride),
+    };
+  });
+  const sortedPitches = entries.map(item => item.midi).sort((a, b) => a - b);
+  const medianPitch = sortedPitches[Math.floor(sortedPitches.length / 2)] || 60;
+  const splitMidi = normalizedLevel === 'advanced'
+    ? Math.max(52, Math.min(68, medianPitch))
+    : 60;
+
+  entries.forEach(entry => {
+    if (!entry.override) return;
+    const resolvedHand = entry.midi <= splitMidi ? 'left' : 'right';
+    map.set(entry.index, {
+      finger: entry.override,
+      hand: resolvedHand,
+    });
+  });
+
+  return { map, splitMidi };
+}
+
+function _drawFingerBadge(ctx, x, y, finger, hand, active = false) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  ctx.save();
+  const safeFinger = Math.max(1, Math.min(5, Number(finger) || 3));
+  const isLeft = hand === 'left';
+  const fingerPalette = {
+    1: ['#14b8a6', '#0f766e'],
+    2: ['#60a5fa', '#1d4ed8'],
+    3: ['#a78bfa', '#6d28d9'],
+    4: ['#f472b6', '#be185d'],
+    5: ['#f59e0b', '#b45309'],
+  };
+  const fillPair = fingerPalette[safeFinger] || fingerPalette[3];
+  const ring = isLeft
+    ? (active ? 'rgba(147,197,253,0.95)' : 'rgba(96,165,250,0.9)')
+    : (active ? 'rgba(253,186,116,0.95)' : 'rgba(251,191,36,0.9)');
+  const fillA = fillPair[0];
+  const fillB = fillPair[1];
+  const radius = active ? 9.2 : 8.4;
+  const gradient = ctx.createLinearGradient(x - radius, y - radius, x + radius, y + radius);
+  gradient.addColorStop(0, fillA);
+  gradient.addColorStop(1, fillB);
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = ring;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(safeFinger), x, y + 0.2);
+  const markerX = isLeft ? (x - radius + 2.4) : (x + radius - 2.4);
+  const markerColor = isLeft ? '#93c5fd' : '#fcd34d';
+  ctx.fillStyle = markerColor;
+  ctx.beginPath();
+  ctx.arc(markerX, y - radius + 2.2, 1.7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 class PianoRoll {
   constructor(container, notes, options = {}) {
     this.container = container;
@@ -1441,6 +1942,12 @@ class PianoRoll {
     this.isLassoSelecting = false;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
+    this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionMap = new Map();
+    this.fingerSuggestionDirty = true;
+    this.fingerSuggestionSignature = '';
+    this.nextFingerSuggestionScanAt = 0;
     this.animId = 0;
     this.lastTs = null;
     this.internalTime = 0;
@@ -1723,8 +2230,75 @@ class PianoRoll {
   }
 
   _emitNotesMutation(action = 'Edit notes') {
+    this._markFingerSuggestionDirty();
     if (this.onNotesChange) this.onNotesChange(this.notes);
     if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+  }
+
+  _markFingerSuggestionDirty() {
+    this.fingerSuggestionDirty = true;
+    this.nextFingerSuggestionScanAt = 0;
+  }
+
+  _buildFingerSuggestionSignature() {
+    const notes = Array.isArray(this.notes) ? this.notes : [];
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    let checksum = 0;
+    for (let i = 0; i < notes.length; i += 1) {
+      const note = notes[i];
+      const midi = clampMidi(note.note);
+      const startBucket = Math.round((Number(note.startTime) || 0) * 100);
+      const durationBucket = Math.round((Number(note.duration) || 0.12) * 100);
+      const fingerOverride = normalizeFingerOverride(note.fingerOverride);
+      checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
+    }
+    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+  }
+
+  _refreshFingerSuggestionCache(force = false) {
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+      return;
+    }
+    if (!force && !this.fingerSuggestionDirty) return;
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionSignature = '';
+    this.fingerSuggestionDirty = false;
+  }
+
+  _hitFingerBadge(x, y) {
+    if (!this.fingerSuggestionMode) return null;
+    for (let i = this.noteHitboxes.length - 1; i >= 0; i -= 1) {
+      const box = this.noteHitboxes[i];
+      if (!box || !box.fingerBadge) continue;
+      const dx = x - box.fingerBadge.x;
+      const dy = y - box.fingerBadge.y;
+      if ((dx * dx) + (dy * dy) <= (box.fingerBadge.r * box.fingerBadge.r)) return box;
+    }
+    return null;
+  }
+
+  _setFingerOverrideForIndices(indices, nextFinger, action = 'Set manual fingering') {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const normalized = normalizeFingerOverride(nextFinger);
+    let changed = false;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const prev = normalizeFingerOverride(note.fingerOverride);
+      if (prev === normalized) return;
+      if (normalized === 0) delete note.fingerOverride;
+      else note.fingerOverride = normalized;
+      changed = true;
+    });
+    if (!changed) return false;
+    this._markFingerSuggestionDirty();
+    if (this.onNotesChange) this.onNotesChange(this.notes);
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+    return true;
   }
 
   _addNoteAt(x, y) {
@@ -1830,6 +2404,7 @@ class PianoRoll {
       });
       if (changed) {
         this.draggingNote.changed = true;
+        this._markFingerSuggestionDirty();
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
       return;
@@ -1849,6 +2424,7 @@ class PianoRoll {
       });
       if (changed) {
         this.draggingNote.changed = true;
+        this._markFingerSuggestionDirty();
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
       return;
@@ -1868,6 +2444,7 @@ class PianoRoll {
     });
     if (changed) {
       this.draggingNote.changed = true;
+      this._markFingerSuggestionDirty();
       if (this.onNotesChange) this.onNotesChange(this.notes);
     }
   }
@@ -1922,6 +2499,21 @@ class PianoRoll {
       md: e => {
         const { x, y } = xy(e);
         if (this.editMode && y < this.H - KEY_H) {
+          if (this.fingerSuggestionMode && e.button === 0) {
+            const fingerHit = this._hitFingerBadge(x, y);
+            if (fingerHit) {
+              if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+              const current = normalizeFingerOverride(fingerHit.noteRef?.fingerOverride) || 0;
+              const next = e.shiftKey
+                ? (current <= 1 ? 5 : current - 1)
+                : (current >= 5 ? 1 : current + 1);
+              this._setFingerOverrideForIndices([fingerHit.index], next, 'Set manual fingering');
+              this.hoverNoteIndex = fingerHit.index;
+              this.hoverNoteMode = 'pitch';
+              this._setCursor(y, 'pitch');
+              return;
+            }
+          }
           const hit = this._hitNote(x, y);
           if (hit) {
             if (e.metaKey || e.ctrlKey) {
@@ -1997,6 +2589,15 @@ class PianoRoll {
         if (!this.editMode) return;
         const { x, y } = xy(e);
         if (y >= this.H - KEY_H) return;
+        if (this.fingerSuggestionMode) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            e.preventDefault();
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            this._setFingerOverrideForIndices([fingerHit.index], 0, 'Clear manual fingering');
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
@@ -2057,6 +2658,18 @@ class PianoRoll {
         const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
         if (!indices.length) return;
         let changed = false;
+
+        if (this.fingerSuggestionMode && /^[0-5]$/.test(e.key)) {
+          const finger = e.key === '0' ? 0 : Number(e.key);
+          if (this._setFingerOverrideForIndices(
+            indices,
+            finger,
+            finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+          )) {
+            e.preventDefault();
+          }
+          return;
+        }
 
         if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
           const step = e.shiftKey ? 12 : 1;
@@ -2206,6 +2819,7 @@ class PianoRoll {
     const PPS = this._getRollPixelsPerSecond();
     const km = new Map(this.keys.map(k => [k.midi, k]));
     const active = new Set();
+    this._refreshFingerSuggestionCache();
     this.notes.forEach(n => { if (time >= n.startTime && time < n.startTime + n.duration) active.add(n.note); });
     this.pressedKeys.forEach(m => active.add(m));
 
@@ -2224,12 +2838,14 @@ class PianoRoll {
       const color=this._noteColor(n.note), x=k.x+1, w=k.w-2, y=Math.max(0,nt), h=Math.min(nb,ROLL_H)-y;
       if(h<=0) return;
 
-      this.noteHitboxes.push({ index, x, y, w, h, noteRef: n });
+      const hitBox = { index, x, y, w, h, noteRef: n };
+      this.noteHitboxes.push(hitBox);
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
       const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const hoverMode = hovered ? this.hoverNoteMode : null;
       const selectedMode = selectedByDrag && this.draggingNote ? this.draggingNote.mode : null;
+      const fingerData = this.fingerSuggestionMode ? this.fingerSuggestionMap.get(index) : null;
 
       ctx.shadowColor=color; ctx.shadowBlur=10; ctx.fillStyle=color; ctx.globalAlpha=0.7+(n.velocity/127)*0.3;
       this._rr(ctx,x,y,w,h,2); ctx.fill(); ctx.globalAlpha=1; ctx.shadowBlur=0;
@@ -2246,6 +2862,20 @@ class PianoRoll {
         const durationMode = (selectedMode === 'duration') || (hoverMode === 'duration');
         ctx.fillStyle = durationMode ? 'rgba(196,181,253,0.95)' : 'rgba(196,181,253,0.55)';
         ctx.fillRect(x + 1, y + 1, Math.max(2, w - 2), 2);
+      }
+
+      if (fingerData && h >= 9 && w >= 7) {
+        const bubbleX = x + (w * 0.5);
+        const bubbleY = Math.min(y + 10, y + Math.max(8, h * 0.22));
+        hitBox.fingerBadge = { x: bubbleX, y: bubbleY, r: selected || hovered ? 9.2 : 8.4 };
+        _drawFingerBadge(
+          ctx,
+          bubbleX,
+          bubbleY,
+          fingerData.finger,
+          fingerData.hand,
+          selected || hovered
+        );
       }
     });
     ctx.shadowBlur=0; ctx.globalAlpha=1;
@@ -2376,6 +3006,7 @@ class PianoRoll {
       ctx.lineWidth=act?1:0.6;
       this._rr(ctx,k.x+0.5,y+2,k.w-1,bkh-2,2); ctx.stroke();
     });
+
   }
 
   setTime(t) {
@@ -2404,6 +3035,30 @@ class PianoRoll {
     if (this.container && this.container.clientWidth > 0 && this.container.clientHeight > 0) {
       this._setup();
     }
+  }
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+    const nextMode = Boolean(enabled);
+    const nextLevel = normalizeFingerSuggestionLevel(level);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    if (!changed) return;
+    this.fingerSuggestionMode = nextMode;
+    this.fingerSuggestionLevel = nextLevel;
+    this._markFingerSuggestionDirty();
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+    }
+  }
+
+  applyFingerOverrideToSelection(finger) {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
+    return this._setFingerOverrideForIndices(
+      indices,
+      finger,
+      finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+    );
   }
   setEditMode(enabled) {
     const next = Boolean(enabled);
@@ -2463,6 +3118,12 @@ class ScoreEditor {
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.readableMode = Boolean(options.readableMode);
+    this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionMap = new Map();
+    this.fingerSuggestionDirty = true;
+    this.fingerSuggestionSignature = '';
+    this.nextFingerSuggestionScanAt = 0;
     this.animId = 0;
 
     this.container.style.overflow = 'hidden';
@@ -2750,11 +3411,46 @@ class ScoreEditor {
   }
 
   _emitNotesChange() {
+    this._markFingerSuggestionDirty();
     if (this.onNotesChange) this.onNotesChange(this.notes);
   }
 
   _emitNotesCommit(action = 'Edit notes') {
     if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+  }
+
+  _markFingerSuggestionDirty() {
+    this.fingerSuggestionDirty = true;
+    this.nextFingerSuggestionScanAt = 0;
+  }
+
+  _buildFingerSuggestionSignature() {
+    const notes = Array.isArray(this.notes) ? this.notes : [];
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    let checksum = 0;
+    for (let i = 0; i < notes.length; i += 1) {
+      const note = notes[i];
+      const midi = clampMidi(note.note);
+      const startBucket = Math.round((Number(note.startTime) || 0) * 100);
+      const durationBucket = Math.round((Number(note.duration) || 0.12) * 100);
+      const fingerOverride = normalizeFingerOverride(note.fingerOverride);
+      checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
+    }
+    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+  }
+
+  _refreshFingerSuggestionCache(force = false) {
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+      return;
+    }
+    if (!force && !this.fingerSuggestionDirty) return;
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionSignature = '';
+    this.fingerSuggestionDirty = false;
   }
 
   _getActiveNoteIndex() {
@@ -2841,6 +3537,37 @@ class ScoreEditor {
       if (inBody) return { ...box, mode: 'note' };
     }
     return null;
+  }
+
+  _hitFingerBadge(x, y) {
+    if (!this.fingerSuggestionMode) return null;
+    for (let i = this.noteHitboxes.length - 1; i >= 0; i -= 1) {
+      const box = this.noteHitboxes[i];
+      if (!box || !box.fingerBadge) continue;
+      const dx = x - box.fingerBadge.x;
+      const dy = y - box.fingerBadge.y;
+      if ((dx * dx) + (dy * dy) <= (box.fingerBadge.r * box.fingerBadge.r)) return box;
+    }
+    return null;
+  }
+
+  _setFingerOverrideForIndices(indices, nextFinger, action = 'Set manual fingering') {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const normalized = normalizeFingerOverride(nextFinger);
+    let changed = false;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const prev = normalizeFingerOverride(note.fingerOverride);
+      if (prev === normalized) return;
+      if (normalized === 0) delete note.fingerOverride;
+      else note.fingerOverride = normalized;
+      changed = true;
+    });
+    if (!changed) return false;
+    this._emitNotesChange();
+    this._emitNotesCommit(action);
+    return true;
   }
 
   _setCursor(hit = null) {
@@ -2996,6 +3723,7 @@ class ScoreEditor {
     const readable = this.readableMode;
     this.layout = layout;
     this.noteHitboxes = [];
+    this._refreshFingerSuggestionCache();
 
     ctx.clearRect(0, 0, W, H);
     const bg = ctx.createLinearGradient(0, 0, 0, H);
@@ -3098,6 +3826,7 @@ class ScoreEditor {
       const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const isLive = this.isPlaying && this.currentTime >= (Number(note.startTime) || 0) && this.currentTime < ((Number(note.startTime) || 0) + duration);
+      const fingerData = this.fingerSuggestionMode ? this.fingerSuggestionMap.get(index) : null;
 
       const color = readable ? 'rgb(186,230,253)' : this._noteColor(midi);
       const accent = readable
@@ -3150,6 +3879,24 @@ class ScoreEditor {
         ctx.strokeRect(x - layout.noteHeadW, y - layout.noteHeadH - 3, layout.noteHeadW * 2.25, layout.noteHeadH * 2.25);
       }
 
+      const fingerBadge = fingerData
+        ? {
+          x: x + (layout.noteHeadW * 1.15),
+          y: y - (layout.noteHeadH * 1.45),
+          r: selected || hovered || isLive ? 9.2 : 8.4,
+        }
+        : null;
+      if (fingerBadge) {
+        _drawFingerBadge(
+          ctx,
+          fingerBadge.x,
+          fingerBadge.y,
+          fingerData.finger,
+          fingerData.hand,
+          selected || hovered || isLive
+        );
+      }
+
       this.noteHitboxes.push({
         index,
         noteRef: note,
@@ -3161,6 +3908,7 @@ class ScoreEditor {
         handleY: y - 7,
         handleW: 14,
         handleH: 14,
+        fingerBadge,
       });
     });
 
@@ -3183,6 +3931,20 @@ class ScoreEditor {
       md: e => {
         if (!this.editMode) return;
         const { x, y } = xy(e);
+        if (this.fingerSuggestionMode && e.button === 0) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            const current = normalizeFingerOverride(fingerHit.noteRef?.fingerOverride) || 0;
+            const next = e.shiftKey
+              ? (current <= 1 ? 5 : current - 1)
+              : (current >= 5 ? 1 : current + 1);
+            this._setFingerOverrideForIndices([fingerHit.index], next, 'Set manual fingering');
+            this.hoverNoteIndex = fingerHit.index;
+            this._setCursor({ mode: 'note' });
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (hit) {
           if (e.metaKey || e.ctrlKey) {
@@ -3255,6 +4017,15 @@ class ScoreEditor {
       cm: e => {
         if (!this.editMode) return;
         const { x, y } = xy(e);
+        if (this.fingerSuggestionMode) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            e.preventDefault();
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            this._setFingerOverrideForIndices([fingerHit.index], 0, 'Clear manual fingering');
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
@@ -3311,6 +4082,18 @@ class ScoreEditor {
         const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
         if (!indices.length) return;
         let changed = false;
+
+        if (this.fingerSuggestionMode && /^[0-5]$/.test(e.key)) {
+          const finger = e.key === '0' ? 0 : Number(e.key);
+          if (this._setFingerOverrideForIndices(
+            indices,
+            finger,
+            finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+          )) {
+            e.preventDefault();
+          }
+          return;
+        }
 
         if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           const step = e.shiftKey ? 12 : 1;
@@ -3421,6 +4204,31 @@ class ScoreEditor {
 
   setReadableMode(enabled) {
     this.readableMode = Boolean(enabled);
+  }
+
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+    const nextMode = Boolean(enabled);
+    const nextLevel = normalizeFingerSuggestionLevel(level);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    if (!changed) return;
+    this.fingerSuggestionMode = nextMode;
+    this.fingerSuggestionLevel = nextLevel;
+    this._markFingerSuggestionDirty();
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+    }
+  }
+
+  applyFingerOverrideToSelection(finger) {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
+    return this._setFingerOverrideForIndices(
+      indices,
+      finger,
+      finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+    );
   }
 
   setEditMode(enabled) {
@@ -3636,6 +4444,17 @@ function _renderEditGuideOverlay(isScoreView) {
         '<strong>X controls:</strong> horizontal zoom out / reset / in.',
         '<strong>Y controls:</strong> vertical zoom out / reset / in.',
         '<strong>Saved per view:</strong> roll uses rollZoomX/rollZoomY and score uses scoreZoomX/scoreZoomY.',
+      ],
+    },
+    {
+      title: 'Finger Labels',
+      details: [
+        '<strong>Finger Labels button:</strong> enables manual finger numbers on editable notes.',
+        '<strong>No automatic suggestion:</strong> fingers appear only when you assign them.',
+        '<strong>Click a finger badge:</strong> cycle manual finger override (1 → 5).',
+        '<strong>Shift + Click badge:</strong> cycle backward (5 → 1).',
+        '<strong>Right click badge:</strong> clear manual override on that note.',
+        '<strong>Keys 1..5:</strong> assign that finger to selected note(s), <strong>0:</strong> clear override.',
       ],
     },
   ];
@@ -3991,6 +4810,13 @@ function renderDashboard(content) {
             >
               ${state.noteEditMode ? 'Editing On' : 'Edit Notes'}
             </button>
+            <button
+              id="finger-suggest-toggle"
+              class="w-finger-suggest-btn ${state.fingerSuggestionMode ? 'active' : ''}"
+              ${state.stage!=='ready' ? 'disabled' : ''}
+            >
+              ${state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels'}
+            </button>
             ${canEditNotes && isScoreView ? `
               <button class="w-score-readable-btn ${state.scoreReadableMode ? 'active' : ''}" id="score-readable-toggle">
                 Readable Score
@@ -4015,6 +4841,17 @@ function renderDashboard(content) {
             <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>Undo</button>
             <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>Redo</button>
             <button class="w-edit-tool-btn ${state.noteHistoryOpen ? 'active' : ''}" id="history-toggle">${state.noteHistoryOpen ? 'Hide History' : 'History'}</button>
+            ${state.fingerSuggestionMode ? `
+              <div class="w-finger-quick">
+                <span class="w-edit-zoom-label">Finger</span>
+                <button class="w-edit-tool-btn" data-finger-set="1">1</button>
+                <button class="w-edit-tool-btn" data-finger-set="2">2</button>
+                <button class="w-edit-tool-btn" data-finger-set="3">3</button>
+                <button class="w-edit-tool-btn" data-finger-set="4">4</button>
+                <button class="w-edit-tool-btn" data-finger-set="5">5</button>
+                <button class="w-edit-tool-btn" data-finger-set="0">Clear</button>
+              </div>
+            ` : ''}
             <div class="w-edit-zoom">
               <span class="w-edit-zoom-label">X</span>
               <button class="w-edit-tool-btn" id="zoom-x-out">-</button>
@@ -4060,6 +4897,8 @@ function renderDashboard(content) {
         _applyEditorNotesCommit(content, notes, action);
       },
       readableMode: state.scoreReadableMode,
+      fingerSuggestionMode: state.fingerSuggestionMode && state.stage === 'ready',
+      fingerSuggestionLevel: state.fingerSuggestionLevel,
     };
 
     if (isScoreView) {
@@ -4068,12 +4907,14 @@ function renderDashboard(content) {
       _scoreEditor.setPlaying(state.midiPlaying);
       _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
       _scoreEditor.setReadableMode(state.scoreReadableMode);
+      _scoreEditor.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
       _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
       _pianoRoll.setTime(state.midiTime);
       _pianoRoll.setPlaying(state.midiPlaying);
       _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
+      _pianoRoll.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
       _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
     }
   }
@@ -4141,6 +4982,26 @@ function renderDashboard(content) {
       'success'
     );
     renderDashboard(content);
+  });
+  content.querySelector('#finger-suggest-toggle')?.addEventListener('click', () => {
+    if (state.stage !== 'ready') return;
+    state.fingerSuggestionMode = !state.fingerSuggestionMode;
+    setStatusMessage(
+      state.fingerSuggestionMode
+        ? 'Finger labels enabled. Assign fingers manually to selected notes.'
+        : 'Finger labels disabled.',
+      'success'
+    );
+    renderDashboard(content);
+  });
+  content.querySelectorAll('[data-finger-set]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!state.noteEditMode || !state.fingerSuggestionMode || state.midiPlaying) return;
+      const finger = normalizeFingerOverride(btn.dataset.fingerSet);
+      const editor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
+      if (!editor || typeof editor.applyFingerOverrideToSelection !== 'function') return;
+      editor.applyFingerOverrideToSelection(finger);
+    });
   });
 
   const updateEditorZoom = (axis, action) => {
