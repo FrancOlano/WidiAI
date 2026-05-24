@@ -376,6 +376,9 @@ let _notesUndoStack = [];
 let _notesRedoStack = [];
 let _lastCommittedNotesSnapshot = null;
 let _editHistoryEntries = [];
+let _appHeader = null;
+let _navigateToPage = null;
+let _dashboardUiCache = null;
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const PROCESS_STEP_BOUNDS = [22, 86, 100];
@@ -1050,15 +1053,22 @@ function injectCSS(container) {
 .widi-app input,.widi-app select,.widi-app textarea{font-family:inherit;}
 
 /* Header - Premium Navigation Bar */
-.w-header{display:flex;align-items:center;justify-content:space-between;padding:12px 28px;flex-shrink:0;position:relative;z-index:100;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));backdrop-filter:blur(24px) saturate(180%);box-shadow:0 4px 16px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;}
+.w-header{display:flex;align-items:center;justify-content:space-between;padding:12px 28px;flex-shrink:0;position:sticky;top:0;z-index:120;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));backdrop-filter:blur(24px) saturate(180%);box-shadow:0 4px 16px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;}
 .w-logo{display:flex;align-items:center;gap:14px;}
+.w-logo-btn{border:none;background:transparent;color:inherit;cursor:pointer;padding:0;display:flex;align-items:center;gap:14px;text-align:left;}
 .w-logo-icon{display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);box-shadow:0 4px 12px rgba(139,92,246,0.4),0 0 24px rgba(139,92,246,0.2),0 1px 0 rgba(255,255,255,0.2) inset;flex-shrink:0;position:relative;}
 .w-logo-icon::before{content:'';position:absolute;inset:0;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.15),transparent);pointer-events:none;}
 .w-logo-name{font-size:20px;font-weight:700;letter-spacing:-0.03em;background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 2px 8px rgba(139,92,246,0.3);}
 .w-logo-sub{font-size:10px;color:#6b7280;margin-top:2px;letter-spacing:0.06em;text-transform:uppercase;}
 .w-beta{font-size:9px;font-weight:600;letter-spacing:0.1em;background:rgba(139,92,246,0.18);color:#c4b5fd;border:1px solid rgba(139,92,246,0.35);border-radius:6px;padding:3px 8px;box-shadow:0 0 8px rgba(139,92,246,0.2);}
 
-/* Navigation Buttons */
+/* Header navigation */
+.w-header-controls{display:flex;align-items:center;gap:12px;}
+.w-header-launch{border:1px solid rgba(139,92,246,0.42);background:linear-gradient(135deg,#4f7df7 0%,#8b5cf6 100%);color:#eef2ff;font-size:20px;font-weight:700;padding:14px 32px;border-radius:18px;box-shadow:0 12px 28px rgba(99,102,241,0.35),0 1px 0 rgba(255,255,255,0.2) inset;cursor:pointer;transition:transform 0.18s ease,box-shadow 0.18s ease,opacity 0.18s ease;}
+.w-header-launch:hover{transform:translateY(-1px);box-shadow:0 16px 34px rgba(99,102,241,0.42),0 1px 0 rgba(255,255,255,0.24) inset;}
+.w-header-launch.active{opacity:0.72;}
+
+/* Dashboard/History/Settings navigation */
 .w-nav{display:flex;align-items:center;gap:6px;}
 .w-nav-btn{font-size:12px;font-weight:500;padding:7px 16px;border-radius:10px;background:transparent;border:1px solid transparent;color:#6b7280;cursor:pointer;transition:all 0.25s cubic-bezier(0.4,0,0.2,1);position:relative;}
 .w-nav-btn::before{content:'';position:absolute;inset:0;border-radius:10px;background:rgba(255,255,255,0.04);opacity:0;transition:opacity 0.25s;}
@@ -1358,6 +1368,10 @@ function injectCSS(container) {
 .w-fade-in{animation:fadeIn 0.25s ease;}
 
 @media (max-width: 1040px){
+  .w-header{padding:10px 12px;}
+  .w-logo-name{font-size:18px;}
+  .w-header-controls{gap:8px;}
+  .w-header-launch{font-size:16px;padding:11px 18px;border-radius:14px;}
   .w-home{padding:16px 14px 20px;}
   .w-home-hero{grid-template-columns:minmax(0,1fr);}
   .w-home-title{font-size:28px;}
@@ -1609,7 +1623,7 @@ class PianoRoll {
         : 'ew-resize';
       return;
     }
-    if (this.editMode && !this.isPlaying && y < this.H - KEY_H && noteMode) {
+    if (this.editMode && y < this.H - KEY_H && noteMode) {
       this.canvas.style.cursor = (noteMode === 'duration' || noteMode === 'time')
         ? 'ns-resize'
         : 'ew-resize';
@@ -1907,7 +1921,7 @@ class PianoRoll {
     this._h = {
       md: e => {
         const { x, y } = xy(e);
-        if (this.editMode && !this.isPlaying && y < this.H - KEY_H) {
+        if (this.editMode && y < this.H - KEY_H) {
           const hit = this._hitNote(x, y);
           if (hit) {
             if (e.metaKey || e.ctrlKey) {
@@ -1945,7 +1959,7 @@ class PianoRoll {
           return;
         }
 
-        const noteHit = this.editMode && !this.isPlaying && y < this.H - KEY_H
+        const noteHit = this.editMode && y < this.H - KEY_H
           ? this._hitNote(x, y)
           : null;
         this.hoverNoteIndex = noteHit ? noteHit.index : -1;
@@ -1972,7 +1986,7 @@ class PianoRoll {
       wu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
       wb: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); this.canvas.style.cursor = 'default'; },
       db: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (y >= this.H - KEY_H) return;
         if (this._hitNote(x, y)) return;
@@ -1980,7 +1994,7 @@ class PianoRoll {
         this._addNoteAt(x, y);
       },
       cm: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (y >= this.H - KEY_H) return;
         const hit = this._hitNote(x, y);
@@ -1990,7 +2004,7 @@ class PianoRoll {
         this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
@@ -2364,8 +2378,16 @@ class PianoRoll {
     });
   }
 
-  setTime(t) { this.currentTime = t; }
-  setPlaying(p) { this.isPlaying = p; }
+  setTime(t) {
+    const next = Number(t) || 0;
+    if (Math.abs(next - this.currentTime) < 0.0001) return;
+    this.currentTime = next;
+  }
+  setPlaying(p) {
+    const next = Boolean(p);
+    if (next === this.isPlaying) return;
+    this.isPlaying = next;
+  }
   setZoom(x, y) {
     const nextX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
     const nextY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
@@ -2827,7 +2849,7 @@ class ScoreEditor {
       return;
     }
     if (!hit) {
-      this.canvas.style.cursor = this.editMode && !this.isPlaying ? 'crosshair' : 'default';
+      this.canvas.style.cursor = this.editMode ? 'crosshair' : 'default';
       return;
     }
     this.canvas.style.cursor = hit.mode === 'duration' ? 'ew-resize' : 'move';
@@ -3159,7 +3181,7 @@ class ScoreEditor {
 
     this._h = {
       md: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         const hit = this._hitNote(x, y);
         if (hit) {
@@ -3191,7 +3213,7 @@ class ScoreEditor {
           this.canvas.style.cursor = 'crosshair';
           return;
         }
-        const hit = this.editMode && !this.isPlaying ? this._hitNote(x, y) : null;
+        const hit = this.editMode ? this._hitNote(x, y) : null;
         this.hoverNoteIndex = hit ? hit.index : -1;
         this._setCursor(hit);
       },
@@ -3224,14 +3246,14 @@ class ScoreEditor {
         this._setCursor(null);
       },
       db: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (this._hitNote(x, y)) return;
         e.preventDefault();
         this._addNoteAt(x, y);
       },
       cm: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         const hit = this._hitNote(x, y);
         if (!hit) return;
@@ -3240,7 +3262,7 @@ class ScoreEditor {
         this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
@@ -3377,11 +3399,15 @@ class ScoreEditor {
   }
 
   setTime(t) {
-    this.currentTime = Math.max(0, Number(t) || 0);
+    const next = Math.max(0, Number(t) || 0);
+    if (Math.abs(next - this.currentTime) < 0.0001) return;
+    this.currentTime = next;
   }
 
   setPlaying(playing) {
-    this.isPlaying = Boolean(playing);
+    const next = Boolean(playing);
+    if (next === this.isPlaying) return;
+    this.isPlaying = next;
   }
 
   setZoom(x, y) {
@@ -3799,6 +3825,7 @@ function _syncHistoryOverlay(content) {
 
 function renderDashboard(content) {
   destroyInstances();
+  _dashboardUiCache = null;
   const aM = state.selectedModel;
   const playbackDuration = getMidiDuration();
   const rollNotes = getNotesForRoll();
@@ -4041,13 +4068,13 @@ function renderDashboard(content) {
       _scoreEditor.setPlaying(state.midiPlaying);
       _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
       _scoreEditor.setReadableMode(state.scoreReadableMode);
-      _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+      _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
       _pianoRoll.setTime(state.midiTime);
       _pianoRoll.setPlaying(state.midiPlaying);
       _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
-      _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+      _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
     }
   }
 
@@ -4179,34 +4206,64 @@ function renderDashboard(content) {
 }
 
 function _updateSeek(content) {
+  if (
+    !_dashboardUiCache ||
+    _dashboardUiCache.content !== content ||
+    !_dashboardUiCache.seek?.isConnected ||
+    !_dashboardUiCache.cur?.isConnected ||
+    !_dashboardUiCache.ps?.isConnected
+  ) {
+    _dashboardUiCache = {
+      content,
+      seek: content.querySelector('#midi-seek'),
+      cur: content.querySelector('#midi-cur'),
+      ps: content.querySelector('#piano-status'),
+      statusKey: '',
+    };
+  }
+
+  const { seek, cur, ps } = _dashboardUiCache;
   const duration = getMidiDuration();
-  const seek = content.querySelector('#midi-seek'), cur = content.querySelector('#midi-cur');
   if (seek) {
-    seek.max = duration;
+    if (Math.abs((Number(seek.max) || 0) - duration) > 0.0001) seek.max = duration;
     seek.value = state.midiTime;
     const p = duration > 0 ? (state.midiTime / duration) * 100 : 0;
-    seek.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
+    const prevP = Number(seek.dataset.pct || '-1');
+    if (!Number.isFinite(prevP) || Math.abs(prevP - p) >= 0.3 || !state.midiPlaying) {
+      seek.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
+      seek.dataset.pct = p.toFixed(2);
+    }
   }
-  if (cur) cur.textContent = fmtTime(state.midiTime);
-  const ps = content.querySelector('#piano-status');
+  if (cur) {
+    const nextTimeText = fmtTime(state.midiTime);
+    if (cur.textContent !== nextTimeText) cur.textContent = nextTimeText;
+  }
   if (ps) {
-    if (state.midiPlaying) {
-      ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
-    } else if (state.noteEditMode && state.stage === 'ready') {
-      ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
-    } else {
-      ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Waiting for MIDI'}</span>`;
+    let statusKey = 'idle';
+    if (state.midiPlaying) statusKey = 'live';
+    else if (state.noteEditMode && state.stage === 'ready') statusKey = 'edit';
+    else if (state.stage !== 'ready') statusKey = 'waiting';
+
+    if (_dashboardUiCache.statusKey !== statusKey) {
+      _dashboardUiCache.statusKey = statusKey;
+      if (statusKey === 'live') {
+        ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
+      } else if (statusKey === 'edit') {
+        ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
+      } else {
+        ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Waiting for MIDI'}</span>`;
+      }
     }
   }
   if (_pianoRoll) {
     _pianoRoll.setTime(state.midiTime);
     _pianoRoll.setPlaying(state.midiPlaying);
-    _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+    _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
   }
   if (_scoreEditor) {
     _scoreEditor.setTime(state.midiTime);
     _scoreEditor.setPlaying(state.midiPlaying);
-    _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+    _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
   }
 }
 
@@ -4240,7 +4297,7 @@ function _handleTransportShortcuts(e) {
 
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     if (state.stage !== 'ready') return;
-    if (state.noteEditMode && !state.midiPlaying) {
+    if (state.noteEditMode) {
       const activeEditor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
       const hasSelection = activeEditor && typeof activeEditor.getSelectionTimeRange === 'function'
         ? Boolean(activeEditor.getSelectionTimeRange())
@@ -4295,6 +4352,8 @@ async function _midiPlayPause(content) {
       btn.innerHTML = ICON.play(20, 'white');
       btn.style.boxShadow = `0 0 15px rgba(139,92,246,0.4)`;
     }
+    // Keep editors in sync right after pause so notes are editable without nudging time.
+    _updateSeek(content);
     _syncEditToolbar(content);
     return;
   }
@@ -5084,168 +5143,33 @@ function renderSettings(content) {
 
 function renderHome(content) {
   destroyInstances();
-  const featureCards = [
-    { icon: ICON.mic(24, '#ffffff'), title: 'Live Recording', description: 'Record directly from your microphone or audio interface with real-time monitoring' },
-    { icon: ICON.fileAudio(24, '#ffffff'), title: 'File Upload', description: 'Support for WAV, MP3, MP4, and other common audio formats' },
-    { icon: ICON.cpu(24, '#ffffff'), title: 'AI-Powered', description: 'Advanced neural networks (TransKun, Onsets & Frames) for accurate transcription' },
-    { icon: ICON.music2(24, '#ffffff'), title: 'MIDI Export', description: 'Download professional-quality MIDI files compatible with all DAWs' },
-    { icon: ICON.waves(24, '#ffffff'), title: 'Visual Feedback', description: 'See your audio waveform and MIDI piano roll side-by-side' },
-    { icon: ICON.sliders(24, '#ffffff'), title: 'Customizable', description: 'Adjust sensitivity, velocity, and other parameters for perfect results' },
-  ];
-
-  const processSteps = [
-    { step: '01', num: 1, title: 'Upload or Record', description: 'Choose an audio file from your device or record live piano performance using your microphone' },
-    { step: '02', num: 2, title: 'AI Processing', description: 'Our advanced neural network analyzes your audio and detects every note, timing, and velocity' },
-    { step: '03', num: 3, title: 'Download MIDI', description: 'Review the results in the piano roll and download your MIDI file ready for any DAW' },
-  ];
-
-  const waveformBars = [46, 38, 74, 54, 61, 33, 79, 44, 52, 68, 36, 63, 57, 49, 72, 41, 67, 39, 84, 47, 58, 34, 76, 51, 66, 42, 70, 48, 55, 37, 81, 45, 62, 40, 73, 53, 60, 43, 78, 50];
-  const midiRows = [
-    { label: 'C6', width: 78 },
-    { label: 'B5', width: 62 },
-    { label: 'A5', width: 86 },
-    { label: 'G5', width: 58 },
-    { label: 'F5', width: 72 },
-  ];
-
   content.innerHTML = `
-    <div style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 0 32px;">
-      <section style="padding:74px 28px 80px;text-align:center;position:relative;z-index:1;">
-        <div style="max-width:900px;margin:0 auto;">
-          <div style="display:inline-block;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.35);border-radius:24px;padding:8px 18px;margin-bottom:24px;">
-            <span style="color:#c4b5fd;font-size:12px;font-weight:600;letter-spacing:0.08em;">AI-POWERED PIANO TRANSCRIPTION</span>
-          </div>
-          <h1 style="font-size:64px;font-weight:700;color:#f0f0f8;margin-bottom:24px;line-height:1.1;letter-spacing:-0.02em;">
-            Convert Piano Audio<br />
-            <span style="background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">to MIDI Instantly</span>
-          </h1>
-          <p style="font-size:18px;color:#9ca3af;max-width:700px;margin:0 auto 40px;">
-            Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.
-          </p>
-          <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-bottom:20px;">
-            <button type="button" data-home-launch style="padding:16px 32px;border-radius:14px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:white;border:none;font-weight:600;font-size:16px;cursor:pointer;box-shadow:0 8px 24px rgba(139,92,246,0.5),0 2px 0 rgba(255,255,255,0.15) inset;">
-              Launch WidiAI
-            </button>
-            <button type="button" data-home-scroll="how-it-works" style="padding:16px 32px;border-radius:14px;background:rgba(255,255,255,0.04);color:#e5e7eb;border:1px solid rgba(255,255,255,0.1);font-weight:600;font-size:16px;cursor:pointer;">
-              Learn More
-            </button>
-          </div>
-          <p style="font-size:12px;color:#6b7280;">No registration required • Works locally • Browser-based workflow</p>
+    <section style="flex:1;min-height:calc(100vh - 84px);display:flex;align-items:center;justify-content:center;padding:36px 20px 56px;text-align:center;position:relative;z-index:1;">
+      <div style="width:100%;max-width:960px;margin:0 auto;">
+        <div style="display:inline-block;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.35);border-radius:24px;padding:8px 18px;margin-bottom:24px;">
+          <span style="color:#c4b5fd;font-size:12px;font-weight:600;letter-spacing:0.08em;">AI-POWERED PIANO TRANSCRIPTION</span>
         </div>
-
-        <div style="max-width:1000px;margin:60px auto 0;border-radius:20px;overflow:hidden;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.35);">
-          <div style="background:rgba(0,0,0,0.4);border-bottom:1px solid rgba(255,255,255,0.06);padding:12px 18px;display:flex;gap:8px;">
-            <div style="width:12px;height:12px;border-radius:50%;background:#ef4444;"></div>
-            <div style="width:12px;height:12px;border-radius:50%;background:#f59e0b;"></div>
-            <div style="width:12px;height:12px;border-radius:50%;background:#10b981;"></div>
-          </div>
-          <div style="padding:32px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;">
-            <div style="background:rgba(0,0,0,0.4);border-radius:14px;padding:20px;border:1px solid rgba(255,255,255,0.08);">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-                ${ICON.waves(20, '#60a5fa')}
-                <span style="color:#e5e7eb;font-weight:600;font-size:14px;">Audio Waveform</span>
-              </div>
-              <div style="height:80px;display:flex;align-items:end;gap:3px;">
-                ${waveformBars.map(height => `<div style="flex:1;background:linear-gradient(180deg,#60a5fa,#3b82f6);border-radius:2px 2px 0 0;height:${height}%;box-shadow:0 0 6px rgba(59,130,246,0.4);"></div>`).join('')}
-              </div>
-            </div>
-            <div style="background:rgba(0,0,0,0.4);border-radius:14px;padding:20px;border:1px solid rgba(255,255,255,0.08);">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
-                ${ICON.music2(20, '#a78bfa')}
-                <span style="color:#e5e7eb;font-weight:600;font-size:14px;">MIDI Notes</span>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:8px;">
-                ${midiRows.map(row => `
-                  <div style="display:flex;align-items:center;gap:8px;">
-                    <div style="width:40px;color:#6b7280;font-size:11px;">${row.label}</div>
-                    <div style="height:18px;background:linear-gradient(90deg,#a78bfa,#8b5cf6);border-radius:4px;width:${row.width}%;box-shadow:0 0 10px rgba(139,92,246,0.5);"></div>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="features" style="padding:80px 28px;position:relative;z-index:1;">
-        <div style="text-align:center;margin-bottom:64px;">
-          <h2 style="font-size:42px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">Powerful Features</h2>
-          <p style="font-size:18px;color:#6b7280;">Everything you need for piano transcription</p>
-        </div>
-        <div style="max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;">
-          ${featureCards.map(feature => `
-            <article style="border-radius:20px;padding:28px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
-              <div style="width:52px;height:52px;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;margin-bottom:18px;box-shadow:0 4px 12px rgba(139,92,246,0.4);">${feature.icon}</div>
-              <h3 style="font-size:18px;font-weight:700;color:#f0f0f8;margin-bottom:10px;">${feature.title}</h3>
-              <p style="font-size:14px;color:#9ca3af;line-height:1.6;">${feature.description}</p>
-            </article>
-          `).join('')}
-        </div>
-      </section>
-
-      <section id="how-it-works" style="padding:80px 28px;position:relative;z-index:1;">
-        <div style="text-align:center;margin-bottom:64px;">
-          <h2 style="font-size:42px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">How It Works</h2>
-          <p style="font-size:18px;color:#6b7280;">Three simple steps to get your MIDI file</p>
-        </div>
-        <div style="max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:32px;">
-          ${processSteps.map(item => `
-            <article style="position:relative;">
-              <div style="font-size:120px;font-weight:700;color:rgba(139,92,246,0.08);position:absolute;top:-24px;left:-8px;line-height:1;">${item.step}</div>
-              <div style="position:relative;border-radius:20px;padding:32px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
-                <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;margin-bottom:18px;color:white;font-weight:700;font-size:20px;box-shadow:0 4px 12px rgba(139,92,246,0.4);">${item.num}</div>
-                <h3 style="font-size:24px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">${item.title}</h3>
-                <p style="font-size:14px;color:#9ca3af;line-height:1.6;">${item.description}</p>
-              </div>
-            </article>
-          `).join('')}
-        </div>
-      </section>
-
-      <section id="about" style="padding:80px 28px;position:relative;z-index:1;">
-        <div style="max-width:900px;margin:0 auto;border-radius:20px;padding:48px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
-          <h2 style="font-size:36px;font-weight:700;color:#f0f0f8;margin-bottom:24px;">About WidiAI</h2>
-          <div style="color:#9ca3af;font-size:16px;line-height:1.8;margin-bottom:32px;">
-            <p style="margin-bottom:16px;">WidiAI is a powerful browser-based application that converts piano audio recordings into MIDI files using state-of-the-art AI models.</p>
-            <p style="margin-bottom:16px;">Built with privacy in mind, the workflow runs directly in your browser UI while connecting to your chosen backend transcription model when needed.</p>
-            <p>Whether you're a composer transcribing recordings, a teacher preparing exercises, or a producer working with piano material, WidiAI keeps the process fast and interactive.</p>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;">
-            ${['100% Free', 'No Registration', 'Privacy First'].map(label => `
-              <div style="display:flex;align-items:center;gap:10px;color:#93c5fd;font-weight:600;">
-                ${ICON.checkCircle(18, '#93c5fd')}
-                <span>${label}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </section>
-
-      <section style="padding:80px 28px 120px;position:relative;z-index:1;">
-        <div style="max-width:900px;margin:0 auto;text-align:center;border-radius:20px;padding:64px 48px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:0 16px 48px rgba(139,92,246,0.5);">
-          <h2 style="font-size:42px;font-weight:700;color:white;margin-bottom:16px;">Ready to get started?</h2>
-          <p style="font-size:18px;color:rgba(255,255,255,0.9);margin-bottom:32px;">Start converting your piano recordings to MIDI in seconds.</p>
-          <button type="button" data-home-launch style="padding:16px 40px;border-radius:14px;background:white;color:#3b82f6;border:none;font-weight:700;font-size:16px;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,0.2);">
-            Launch WidiAI Now
+        <h1 style="font-size:clamp(48px,8vw,96px);font-weight:700;color:#f0f0f8;margin-bottom:24px;line-height:1.04;letter-spacing:-0.03em;">
+          Convert Piano Audio<br />
+          <span style="background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">to MIDI Instantly</span>
+        </h1>
+        <p style="font-size:clamp(16px,2.1vw,20px);color:#9ca3af;max-width:760px;margin:0 auto 42px;">
+          Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.
+        </p>
+        <div style="display:flex;justify-content:center;margin-bottom:20px;">
+          <button type="button" data-home-launch style="padding:16px 44px;border-radius:16px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:white;border:none;font-weight:700;font-size:clamp(18px,2.1vw,24px);cursor:pointer;box-shadow:0 12px 30px rgba(139,92,246,0.45),0 2px 0 rgba(255,255,255,0.16) inset;">
+            Launch WidiAI
           </button>
         </div>
-      </section>
-
-      <footer style="border-top:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));padding:24px 28px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-          <div style="display:flex;align-items:center;gap:12px;">
-            <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);box-shadow:0 4px 12px rgba(139,92,246,0.4);display:flex;align-items:center;justify-content:center;">${ICON.waves(16, '#ffffff')}</div>
-            <div>
-              <p style="color:#f0f0f8;font-weight:600;font-size:14px;">WidiAI</p>
-              <p style="font-size:10px;color:#6b7280;">Wave MIDI AI</p>
-            </div>
-          </div>
-          <p style="color:#6b7280;font-size:12px;">© 2026 WidiAI. All rights reserved.</p>
-        </div>
-      </footer>
-    </div>`;
+        <p style="font-size:12px;color:#6b7280;">No registration required • Works locally • Browser-based workflow</p>
+      </div>
+    </section>`;
 
   const go = (page) => {
+    if (typeof _navigateToPage === 'function') {
+      _navigateToPage(page);
+      return;
+    }
     state.page = page;
     _syncNavButtons();
     renderPage(content);
@@ -5254,16 +5178,6 @@ function renderHome(content) {
   content.querySelectorAll('[data-home-launch]').forEach(btn => {
     btn.addEventListener('click', () => go('dashboard'));
   });
-
-  content.querySelectorAll('[data-home-scroll]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const targetId = btn.dataset.homeScroll;
-      const target = targetId ? content.querySelector(`#${targetId}`) : null;
-      if (target && typeof target.scrollIntoView === 'function') {
-        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    });
-  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5271,16 +5185,61 @@ function renderHome(content) {
 // ═══════════════════════════════════════════════════════════════════
 
 function _syncNavButtons() {
-  document.querySelectorAll('.w-nav-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.nav === state.page);
+  document.querySelectorAll('[data-app-nav]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.appNav === state.page);
   });
 }
 
+function _renderHeader() {
+  if (!_appHeader) return;
+  const logoHtml = `
+    <button type="button" class="w-logo w-logo-btn" data-header-home aria-label="Go to home">
+      <div class="w-logo-icon">${ICON.waves(18,'white')}</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:8px;line-height:1;">
+          <span class="w-logo-name">WidiAI</span>
+          <span class="w-beta">BETA</span>
+        </div>
+        <p class="w-logo-sub">Wave MIDI AI</p>
+      </div>
+    </button>`;
+
+  if (state.page === 'home') {
+    _appHeader.classList.add('w-header-home');
+    _appHeader.innerHTML = `${logoHtml}`;
+  } else {
+    _appHeader.classList.remove('w-header-home');
+    _appHeader.innerHTML = `
+      ${logoHtml}
+      <nav class="w-nav">
+        <button class="w-nav-btn" data-app-nav="dashboard">Dashboard</button>
+        <button class="w-nav-btn" data-app-nav="history">History</button>
+        <button class="w-nav-btn" data-app-nav="settings">Settings</button>
+      </nav>`;
+    _appHeader.querySelectorAll('[data-app-nav]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (typeof _navigateToPage === 'function') _navigateToPage(btn.dataset.appNav);
+      });
+    });
+  }
+
+  _appHeader.querySelector('[data-header-home]')?.addEventListener('click', () => {
+    if (typeof _navigateToPage === 'function') _navigateToPage('home');
+  });
+
+  _syncNavButtons();
+}
+
 function renderPage(content) {
-  if (state.page === 'home') renderHome(content);
-  else if (state.page === 'dashboard') renderDashboard(content);
-  else if (state.page === 'history') renderHistory(content);
-  else if (state.page === 'settings') renderSettings(content);
+  if (state.page === 'home') {
+    renderHome(content);
+  } else if (state.page === 'dashboard') {
+    renderDashboard(content);
+  } else if (state.page === 'history') {
+    renderHistory(content);
+  } else if (state.page === 'settings') {
+    renderSettings(content);
+  }
 }
 
 export function init(container) {
@@ -5304,31 +5263,8 @@ export function init(container) {
   // Header
   const header = document.createElement('header');
   header.className = 'w-header';
-  header.innerHTML = `
-    <div class="w-logo">
-      <div class="w-logo-icon">${ICON.waves(18,'white')}</div>
-      <div>
-        <div style="display:flex;align-items:center;gap:8px;line-height:1;">
-          <span class="w-logo-name">WidiAI</span>
-          <span class="w-beta">BETA</span>
-        </div>
-        <p class="w-logo-sub">Wave MIDI AI</p>
-      </div>
-    </div>
-    <nav class="w-nav">
-      <button class="w-nav-btn active" data-nav="home">Home</button>
-      <button class="w-nav-btn" data-nav="dashboard">Dashboard</button>
-      <button class="w-nav-btn" data-nav="history">History</button>
-      <button class="w-nav-btn" data-nav="settings">Settings</button>
-    </nav>`;
-  header.querySelectorAll('[data-nav]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.page = btn.dataset.nav;
-      _syncNavButtons();
-      renderPage(content);
-    });
-  });
   container.appendChild(header);
+  _appHeader = header;
 
   // Content
   const wrap = document.createElement('div');
@@ -5339,6 +5275,13 @@ export function init(container) {
   wrap.appendChild(content);
   container.appendChild(wrap);
 
+  const goToPage = page => {
+    state.page = page;
+    _renderHeader();
+    renderPage(content);
+  };
+  _navigateToPage = goToPage;
+  _renderHeader();
   renderPage(content);
   hydrateStoredAudio(content);
 
@@ -5346,6 +5289,9 @@ export function init(container) {
   return () => {
     destroyInstances();
     unbindTransportShortcuts();
+    _navigateToPage = null;
+    _appHeader = null;
+    _dashboardUiCache = null;
     if (_recTimer) clearTimeout(_recTimer);
     if (_progressTimer) clearInterval(_progressTimer);
     if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
