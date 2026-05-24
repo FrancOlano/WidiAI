@@ -98,6 +98,7 @@ const STORAGE_KEYS = {
   lastAudioId: 'widi.lastAudioId',
   apiUrl: 'widi.apiUrl',
   noteGuideOpen: 'widi.noteGuideOpen',
+  settings: 'widi.settings.v1',
 };
 
 const AUDIO_DB = {
@@ -113,37 +114,96 @@ const SF2_SOUND_FONT_URL = '/static/soundfonts/full-grand-piano.sf2';
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
 
-const getConfiguredApiUrl = () => {
+const DEFAULT_SETTINGS = Object.freeze({
+  autoConvert: false,
+  velocitySensitivity: 80,
+  notificationsOn: true,
+  preferSf2Playback: true,
+});
+
+const clampSettingNumber = (value, min, max, fallback) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+};
+
+const normalizeModelId = (model) => {
+  const value = String(model || '').trim().toLowerCase();
+  if (value === 'onsets' || value === 'own') return 'onsets_and_frames';
+  return MODEL_IDS.includes(value) ? value : '';
+};
+
+const getDefaultApiUrlValue = () => {
   const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
     ? window.__WIDI_ENV__.API_URL.trim()
     : '';
-  const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
-  const base = fromStorage || fromEnv || window.location.origin;
+  return fromEnv || window.location.origin;
+};
+
+const normalizeApiUrl = (rawUrl) => {
+  const trimmed = String(rawUrl || '').trim();
+  const base = trimmed || getDefaultApiUrlValue();
   return base.replace(/\/+$/, '');
 };
 
-const getStoredModel = () => {
-  const stored = localStorage.getItem(STORAGE_KEYS.selectedModel);
-  if (stored === 'onsets' || stored === 'own') return 'onsets_and_frames';
-  return MODEL_IDS.includes(stored) ? stored : null;
-};
-
-const persistSelectedModel = (model) => {
-  if (MODEL_IDS.includes(model)) {
-    localStorage.setItem(STORAGE_KEYS.selectedModel, model);
-    window.selectedModel = model;
+const readLocalStorage = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch (_) {
+    return null;
   }
 };
 
+const getConfiguredApiUrl = () => {
+  const fromStorage = readLocalStorage(STORAGE_KEYS.apiUrl) || '';
+  return normalizeApiUrl(fromStorage || getDefaultApiUrlValue());
+};
+
+const getStoredModel = () => {
+  const normalized = normalizeModelId(readLocalStorage(STORAGE_KEYS.selectedModel));
+  return normalized || null;
+};
+
+const persistSelectedModel = (model) => {
+  const normalized = normalizeModelId(model);
+  if (!normalized) return;
+  try {
+    localStorage.setItem(STORAGE_KEYS.selectedModel, normalized);
+  } catch (_) {}
+  window.selectedModel = normalized;
+};
+
 const getStoredGuideOpen = () => {
-  const stored = localStorage.getItem(STORAGE_KEYS.noteGuideOpen);
+  const stored = readLocalStorage(STORAGE_KEYS.noteGuideOpen);
   if (stored === '0') return false;
   if (stored === '1') return true;
   return true;
 };
 
 const persistGuideOpen = (open) => {
-  localStorage.setItem(STORAGE_KEYS.noteGuideOpen, open ? '1' : '0');
+  try {
+    localStorage.setItem(STORAGE_KEYS.noteGuideOpen, open ? '1' : '0');
+  } catch (_) {}
+};
+
+const getStoredSettings = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.settings);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      apiUrl: normalizeApiUrl(parsed.apiUrl),
+      selectedModel: normalizeModelId(parsed.selectedModel) || 'transkun',
+      autoConvert: Boolean(parsed.autoConvert),
+      velocitySensitivity: Math.round(clampSettingNumber(parsed.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
+      notificationsOn: parsed.notificationsOn !== false,
+      preferSf2Playback: parsed.preferSf2Playback !== false,
+    };
+  } catch (error) {
+    console.warn('Failed to load stored settings:', error);
+    return null;
+  }
 };
 
 
@@ -228,7 +288,9 @@ const hydrateStoredAudio = async (content) => {
     const entry = await loadAudioEntry(lastId);
     if (entry) {
       applyAudioEntryToState(entry);
-      renderDashboard(content);
+      if (state.page === 'dashboard') {
+        renderDashboard(content);
+      }
     }
   } catch (error) {
     console.warn('Failed to load stored audio:', error);
@@ -253,14 +315,15 @@ const resolveAudioForTranscription = async () => {
 
 const storedModel = getStoredModel();
 const storedGuideOpen = getStoredGuideOpen();
+const storedSettings = getStoredSettings();
 
 const state = {
-  page: 'dashboard',
-  apiUrl: getConfiguredApiUrl(),
+  page: 'home',
+  apiUrl: storedSettings?.apiUrl || getConfiguredApiUrl(),
   // Dashboard
   stage: 'idle',   // idle | loaded | processing | ready
   isRecording: false,
-  selectedModel: storedModel || 'transkun',
+  selectedModel: storedSettings?.selectedModel || storedModel || 'transkun',
   progress: 0,
   midiPlaying: false,
   midiTime: 0,
@@ -289,12 +352,10 @@ const state = {
   histSearch: '', histStatus: 'all', histModel: 'all', histSort: 'date',
   histDeleted: new Set(), histSortOpen: false,
   // Settings
-  inputDevice: 'Default Microphone', sampleRate: '44100 Hz', bitDepth: '24-bit',
-  noiseReduction: true, silenceTrim: true, defaultModel: 'TransKun',
-  processingQuality: 'High', autoConvert: false, velocitySensitivity: 80,
-  quantization: '1/16', includeSustain: true, defaultFormat: 'MIDI Type 1',
-  tempoDetection: true, autoSave: true, notificationsOn: true,
-  storageLimit: '5 GB', settingsSaved: false,
+  autoConvert: storedSettings?.autoConvert ?? DEFAULT_SETTINGS.autoConvert,
+  velocitySensitivity: storedSettings?.velocitySensitivity ?? DEFAULT_SETTINGS.velocitySensitivity,
+  notificationsOn: storedSettings?.notificationsOn ?? DEFAULT_SETTINGS.notificationsOn,
+  preferSf2Playback: storedSettings?.preferSf2Playback ?? DEFAULT_SETTINGS.preferSf2Playback,
 };
 
 // Mutable references (not state, just handles)
@@ -317,8 +378,12 @@ let _lastCommittedNotesSnapshot = null;
 let _editHistoryEntries = [];
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
-const getNotesForRoll = () => state.midiNotes.length ? state.midiNotes : MIDI_NOTES;
+const PROCESS_STEP_BOUNDS = [22, 86, 100];
+const getMidiDuration = () => {
+  if (state.midiDuration > 0) return state.midiDuration;
+  return state.stage === 'ready' ? DEFAULT_TOTAL_DURATION : 0;
+};
+const getNotesForRoll = () => Array.isArray(state.midiNotes) ? state.midiNotes : [];
 const getBackendModel = () => state.selectedModel;
 const setStatusMessage = (message, type = 'info') => {
   state.statusMessage = message;
@@ -328,6 +393,60 @@ const clearStatusMessage = () => {
   state.statusMessage = '';
   state.statusType = 'info';
 };
+
+const getSettingsSnapshot = () => ({
+  apiUrl: normalizeApiUrl(state.apiUrl),
+  selectedModel: normalizeModelId(state.selectedModel) || 'transkun',
+  autoConvert: Boolean(state.autoConvert),
+  velocitySensitivity: Math.round(clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
+  notificationsOn: Boolean(state.notificationsOn),
+  preferSf2Playback: Boolean(state.preferSf2Playback),
+});
+
+function persistAppSettings() {
+  const snapshot = getSettingsSnapshot();
+  state.apiUrl = snapshot.apiUrl;
+  state.selectedModel = snapshot.selectedModel;
+  state.autoConvert = snapshot.autoConvert;
+  state.velocitySensitivity = snapshot.velocitySensitivity;
+  state.notificationsOn = snapshot.notificationsOn;
+  state.preferSf2Playback = snapshot.preferSf2Playback;
+  persistSelectedModel(snapshot.selectedModel);
+  try {
+    localStorage.setItem(STORAGE_KEYS.apiUrl, snapshot.apiUrl);
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn('Failed to persist app settings:', error);
+  }
+}
+
+const getVelocitySensitivityGain = () => {
+  const normalized = clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity) / 127;
+  return 0.35 + (normalized * 1.3);
+};
+
+const applyVelocitySensitivity = (velocityNorm) => {
+  const base = Math.min(1, Math.max(0.02, Number(velocityNorm) || 0.8));
+  return Math.min(1, Math.max(0.02, base * getVelocitySensitivityGain()));
+};
+
+function notifyConversionEvent(title, body) {
+  if (!state.notificationsOn) return;
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    try { new Notification(title, { body }); } catch (_) {}
+    return;
+  }
+  if (Notification.permission === 'default') {
+    Notification.requestPermission()
+      .then(permission => {
+        if (permission === 'granted') {
+          try { new Notification(title, { body }); } catch (_) {}
+        }
+      })
+      .catch(() => {});
+  }
+}
 
 function _cloneNotes(notes) {
   return (Array.isArray(notes) ? notes : []).map(note => ({
@@ -372,6 +491,7 @@ function _recordEditHistory(action, type = 'edit') {
     action: label,
     type,
     stamp,
+    notes: _cloneNotes(state.midiNotes),
   });
   if (_editHistoryEntries.length > 120) _editHistoryEntries.pop();
 }
@@ -458,6 +578,43 @@ function _redoNoteEdit(content) {
   _syncEditToolbar(content);
   _syncHistoryOverlay(content);
   return true;
+}
+
+function _restoreEditHistoryEntry(content, historyId) {
+  if (state.stage !== 'ready' || state.midiPlaying) return false;
+  const entry = _editHistoryEntries.find(item => item.id === historyId);
+  if (!entry || !Array.isArray(entry.notes)) return false;
+  const targetNotes = _cloneNotes(entry.notes);
+  if (_notesEqual(state.midiNotes, targetNotes)) return false;
+
+  _notesUndoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action: `Restore to ${entry.stamp}`,
+  });
+  if (_notesUndoStack.length > 120) _notesUndoStack.shift();
+  _notesRedoStack = [];
+
+  _replaceMidiNotesInPlace(targetNotes);
+  _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Restore · ${entry.action}`, 'restore');
+
+  const rebuilt = _rebuildMidiBlobFromEditedNotes();
+  if (!rebuilt) console.warn('History restore applied, but MIDI export refresh failed.');
+  if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
+  _updateSeek(content);
+  _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
+  return true;
+}
+
+function _bindHistoryOverlayActions(content) {
+  if (!content) return;
+  content.querySelectorAll('[data-history-restore]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (state.midiPlaying) return;
+      _restoreEditHistoryEntry(content, btn.dataset.historyRestore);
+    });
+  });
 }
 
 function _syncEditToolbar(content) {
@@ -685,9 +842,11 @@ function stopNativePlayback() {
 }
 
 function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
-  if (_sf2Synth) {
+  const normalizedVelocity = applyVelocitySensitivity(velocityNorm);
+
+  if (_sf2Synth && state.preferSf2Playback) {
     const midiNote = Math.max(0, Math.min(127, Math.round(Number(noteNumber) || 0)));
-    const velocity = Math.max(1, Math.min(127, Math.round((Math.min(1, Math.max(0.02, velocityNorm || 0.8))) * 127)));
+    const velocity = Math.max(1, Math.min(127, Math.round(normalizedVelocity * 127)));
     const noteDurationMs = Math.max(25, Math.round(Math.max(0.03, Number(durationSec) || 0.12) * 1000));
     _sf2Synth.midiNoteOn(0, midiNote, velocity);
     const noteOffTimer = setTimeout(() => {
@@ -702,7 +861,7 @@ function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
   const ctx = _nativeAudioCtx;
   const now = ctx.currentTime;
   const freq = midiToFrequency(noteNumber);
-  const velocity = Math.min(1, Math.max(0.08, velocityNorm));
+  const velocity = Math.min(1, Math.max(0.08, normalizedVelocity));
 
   const noteDuration = Math.max(0.05, durationSec);
   const release = Math.min(2.4, Math.max(0.55, noteDuration * 0.55));
@@ -914,6 +1073,32 @@ function injectCSS(container) {
 /* Layout */
 .w-content{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative;z-index:1;min-width:0;}
 
+/* Home / Landing */
+.w-home{flex:1;overflow-y:auto;padding:22px 24px 28px;display:flex;flex-direction:column;gap:16px;}
+.w-home-hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px;}
+.w-home-panel{border-radius:20px;padding:22px;background:linear-gradient(145deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px);box-shadow:0 10px 26px rgba(0,0,0,0.28);}
+.w-home-title{font-size:34px;line-height:1.02;font-weight:800;letter-spacing:-0.03em;background:linear-gradient(145deg,#dbeafe 0%,#93c5fd 35%,#c4b5fd 70%,#ddd6fe 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.w-home-sub{margin-top:10px;font-size:14px;color:#cbd5e1;line-height:1.45;max-width:740px;}
+.w-home-actions{margin-top:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.w-home-launch{display:inline-flex;align-items:center;gap:9px;padding:11px 18px;border-radius:12px;border:1px solid rgba(139,92,246,0.42);background:linear-gradient(135deg,rgba(59,130,246,0.32),rgba(139,92,246,0.34));color:#f5f3ff;font-size:12px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;box-shadow:0 8px 22px rgba(79,70,229,0.24);}
+.w-home-launch:hover{transform:translateY(-1px);}
+.w-home-ghost{display:inline-flex;align-items:center;gap:7px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.04);color:#d1d5db;font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;}
+.w-home-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px;}
+.w-home-kpi{border-radius:12px;padding:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);}
+.w-home-kpi p:first-child{font-size:20px;font-weight:800;color:#e9d5ff;line-height:1;}
+.w-home-kpi p:last-child{margin-top:4px;font-size:10px;color:#94a3b8;letter-spacing:0.05em;text-transform:uppercase;}
+.w-home-preview{height:100%;min-height:250px;border-radius:16px;padding:14px;border:1px solid rgba(59,130,246,0.28);background:radial-gradient(circle at 20% 14%,rgba(59,130,246,0.22),transparent 42%),radial-gradient(circle at 84% 76%,rgba(139,92,246,0.26),transparent 46%),rgba(5,8,20,0.84);}
+.w-home-preview-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;height:130px;align-items:end;margin-top:8px;}
+.w-home-preview-note{border-radius:7px 7px 3px 3px;background:linear-gradient(180deg,rgba(96,165,250,0.95),rgba(139,92,246,0.72));box-shadow:0 0 12px rgba(139,92,246,0.4);}
+.w-home-preview-keys{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:2px;height:68px;margin-top:12px;}
+.w-home-preview-key{border-radius:0 0 4px 4px;border:1px solid rgba(255,255,255,0.15);background:linear-gradient(180deg,#f8fafc,#e2e8f0);}
+.w-home-preview-key.black{background:linear-gradient(180deg,#111827,#020617);border-color:rgba(15,23,42,0.7);}
+.w-home-section{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+.w-home-card{border-radius:14px;padding:14px;border:1px solid rgba(255,255,255,0.1);background:linear-gradient(155deg,rgba(255,255,255,0.03),rgba(0,0,0,0.15));}
+.w-home-card h3{font-size:12px;color:#e2e8f0;letter-spacing:0.05em;text-transform:uppercase;}
+.w-home-card p{margin-top:6px;font-size:12px;color:#9ca3af;line-height:1.45;}
+.w-home-pill{display:inline-flex;align-items:center;gap:6px;margin-top:9px;padding:5px 8px;border-radius:999px;border:1px solid rgba(59,130,246,0.32);background:rgba(59,130,246,0.13);font-size:9px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;}
+
 /* Premium Glass Panels */
 .w-panel{border-radius:20px;padding:20px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset,0 -1px 0 rgba(0,0,0,0.2) inset;position:relative;min-width:0;}
 .w-panel::before{content:'';position:absolute;inset:0;border-radius:20px;background:radial-gradient(600px circle at var(--mouse-x,50%) var(--mouse-y,50%),rgba(139,92,246,0.08),transparent 40%);opacity:0;transition:opacity 0.3s;pointer-events:none;}
@@ -1068,11 +1253,14 @@ function injectCSS(container) {
 .w-edit-history-head p{font-size:10px;color:#bfdbfe;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;}
 .w-edit-history-meta{font-size:9px;color:#9ca3af;}
 .w-edit-history-list{overflow:auto;padding:7px 8px 8px;display:flex;flex-direction:column;gap:6px;}
-.w-edit-history-item{border-radius:8px;padding:7px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
+.w-edit-history-item{width:100%;border-radius:8px;padding:7px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);text-align:left;cursor:pointer;transition:all 0.18s;}
+.w-edit-history-item:hover{background:rgba(59,130,246,0.12);border-color:rgba(59,130,246,0.35);}
+.w-edit-history-item:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(59,130,246,0.45);}
 .w-edit-history-item-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .w-edit-history-item p{font-size:10px;color:#e5e7eb;line-height:1.3;}
 .w-edit-history-item span{font-size:9px;color:#9ca3af;}
 .w-edit-history-type{font-size:8px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.06em;padding:1px 5px;border-radius:999px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.15);}
+.w-edit-history-item-sub{display:block;margin-top:4px;font-size:8px;color:#6b7280;letter-spacing:0.03em;text-transform:uppercase;}
 .w-edit-history-empty{padding:18px 10px 20px;text-align:center;font-size:10px;color:#6b7280;}
 .w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
 .w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
@@ -1170,6 +1358,11 @@ function injectCSS(container) {
 .w-fade-in{animation:fadeIn 0.25s ease;}
 
 @media (max-width: 1040px){
+  .w-home{padding:16px 14px 20px;}
+  .w-home-hero{grid-template-columns:minmax(0,1fr);}
+  .w-home-title{font-size:28px;}
+  .w-home-kpis{grid-template-columns:repeat(3,minmax(0,1fr));}
+  .w-home-section{grid-template-columns:minmax(0,1fr);}
   .w-top-grid{grid-template-columns:minmax(0,1fr);}
   .w-piano-wrap.edit-mode{height:clamp(660px,93vh,820px);min-height:660px;}
   .w-piano-wrap.edit-mode .w-piano-body{min-height:430px;}
@@ -3564,17 +3757,18 @@ function _renderEditHistoryPanel() {
     <div class="w-edit-history-panel">
       <div class="w-edit-history-head">
         <p>Edit History</p>
-        <span class="w-edit-history-meta">Undo ${_notesUndoStack.length} · Redo ${_notesRedoStack.length}</span>
+        <span class="w-edit-history-meta">Undo ${_notesUndoStack.length} · Redo ${_notesRedoStack.length} · Click to restore</span>
       </div>
       <div class="w-edit-history-list">
         ${items.length ? items.map(item => `
-          <div class="w-edit-history-item">
+          <button class="w-edit-history-item" type="button" data-history-restore="${item.id}">
             <div class="w-edit-history-item-head">
               <span class="w-edit-history-type">${item.type}</span>
               <span>${item.stamp}</span>
             </div>
             <p>${item.action}</p>
-          </div>
+            <span class="w-edit-history-item-sub">${Array.isArray(item.notes) ? item.notes.length : 0} notes</span>
+          </button>
         `).join('') : '<div class="w-edit-history-empty">No edit actions yet.</div>'}
       </div>
     </div>
@@ -3600,6 +3794,7 @@ function _syncHistoryOverlay(content) {
   } else {
     body.insertAdjacentHTML('beforebegin', panelHtml);
   }
+  _bindHistoryOverlayActions(content);
 }
 
 function renderDashboard(content) {
@@ -3608,6 +3803,9 @@ function renderDashboard(content) {
   const playbackDuration = getMidiDuration();
   const rollNotes = getNotesForRoll();
   const safeProgress = playbackDuration > 0 ? (state.midiTime / playbackDuration) * 100 : 0;
+  const hasAudioForTranscription = Boolean(state.audioFile || state.audioEntryId);
+  const canConvertNow = hasAudioForTranscription && state.stage !== 'processing' && !state.isRecording;
+  const convertLabel = state.stage === 'ready' ? 'Re-convert to MIDI' : 'Convert to MIDI';
   const canEditNotes = state.noteEditMode && state.stage === 'ready';
   const activeEditorView = canEditNotes ? state.noteEditorView : 'roll';
   const isScoreView = activeEditorView === 'score';
@@ -3634,7 +3832,18 @@ function renderDashboard(content) {
               <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a,.webm" style="display:none;">
             </div>
           </div>
-          ${state.fileName ? `<div class="w-file-badge w-fade-in" style="margin-bottom:12px;">${ICON.checkCircle(11,'#10b981')} <span style="font-size:11px;color:#6ee7b7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.fileName}</span></div>` : ''}
+          ${state.fileName ? `
+            <div class="w-file-badge w-fade-in" style="margin-bottom:12px;justify-content:space-between;">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                ${ICON.checkCircle(11,'#10b981')}
+                <span style="font-size:11px;color:#6ee7b7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.fileName}</span>
+              </div>
+              <button id="clear-audio-btn" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:8px;padding:5px 9px;border:1px solid rgba(239,68,68,0.35);background:rgba(239,68,68,0.14);color:#fecaca;font-size:10px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;">
+                ${ICON.trash(10,'#fecaca')}
+                Clear
+              </button>
+            </div>
+          ` : ''}
           ${state.isRecording ? '<div class="w-waveform" id="wf-wrap"></div>' : ''}
           <div id="ap-wrap"></div>
         </div>
@@ -3674,8 +3883,8 @@ function renderDashboard(content) {
             <p style="font-size:16px;font-weight:700;color:#10b981;">${aM==='transkun'?'97%':'94%'}</p>
             <p style="font-size:10px;color:#6b7280;">Accuracy</p>
           </div>
-          <button id="convert-btn" class="w-convert-btn" ${state.stage!=='loaded'?'disabled':''} style="background:${state.stage==='loaded'?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.04)'};border:${state.stage==='loaded'?'none':'1px solid rgba(255,255,255,0.08)'};color:${state.stage==='loaded'?'white':'#4b5563'};cursor:${state.stage==='loaded'?'pointer':'not-allowed'};opacity:${state.stage==='loaded'?1:0.45};box-shadow:${state.stage==='loaded'?'0 0 25px rgba(139,92,246,0.45)':'none'};">
-            ${ICON.zap(14,state.stage==='loaded'?'white':'#4b5563')} Convert to MIDI
+          <button id="convert-btn" class="w-convert-btn" ${canConvertNow?'':'disabled'} style="background:${canConvertNow?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.04)'};border:${canConvertNow?'none':'1px solid rgba(255,255,255,0.08)'};color:${canConvertNow?'white':'#4b5563'};cursor:${canConvertNow?'pointer':'not-allowed'};opacity:${canConvertNow?1:0.45};box-shadow:${canConvertNow?'0 0 25px rgba(139,92,246,0.45)':'none'};">
+            ${ICON.zap(14,canConvertNow?'white':'#4b5563')} ${convertLabel}
           </button>
           ${state.statusMessage ? `
             <div class="w-file-badge w-fade-in" style="margin-top:12px;background:${state.statusType==='error'?'linear-gradient(135deg,rgba(239,68,68,0.14),rgba(239,68,68,0.08))':'linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.06))'};border:1px solid ${state.statusType==='error'?'rgba(239,68,68,0.35)':'rgba(16,185,129,0.25)'};">
@@ -3688,8 +3897,8 @@ function renderDashboard(content) {
               <span style="font-size:11px;color:#6b7280;" id="proc-pct">${Math.round(state.progress)}%</span>
             </div>
             <div class="w-progress-bar"><div class="w-progress-fill" id="proc-bar" style="width:${state.progress}%"></div></div>
-            <div style="display:flex;gap:6px;margin-top:8px;">
-              ${['Upload','Analysis','MIDI mapping'].map((s,i)=>{const ok=state.progress>=[18,48,76][i];return `<div class="w-step" style="background:${ok?'rgba(16,185,129,0.12)':'rgba(255,255,255,0.04)'};border:1px solid ${ok?'rgba(16,185,129,0.25)':'rgba(255,255,255,0.06)'};" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:${ok?'#10b981':'#374151'};"></div><span style="font-size:9px;color:${ok?'#6ee7b7':'#4b5563'};">${s}</span></div>`}).join('')}
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;width:100%;">
+              ${['Upload','Transcribe','Build MIDI'].map((s,i)=>`<div class="w-step" style="width:100%;justify-content:center;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:#374151;"></div><span style="font-size:9px;color:#4b5563;">${s}</span></div>`).join('')}
             </div>
           </div>
           ${state.stage==='ready'?`<div class="w-file-badge w-fade-in" style="margin-top:12px;">${ICON.checkCircle(13,'#10b981')} <span style="font-size:11px;color:#6ee7b7;">MIDI conversion complete!</span></div>`:''}
@@ -3715,11 +3924,18 @@ function renderDashboard(content) {
               <span style="font-size:10px;color:#6b7280;">${fmtTime(playbackDuration)}</span>
             </div>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.music2(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready'?rollNotes.length:'—'}</p><p style="font-size:9px;color:#4b5563;">Notes</p></div>
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.clock(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready'?fmtTime(playbackDuration):'—'}</p><p style="font-size:9px;color:#4b5563;">Duration</p></div>
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.activity(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready' && state.midiTempo ? `${Math.round(state.midiTempo)} BPM` : '—'}</p><p style="font-size:9px;color:#4b5563;">Tempo</p></div>
-          </div>
+          ${state.stage === 'ready' ? `
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.music2(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${rollNotes.length}</p><p style="font-size:9px;color:#4b5563;">Notes</p></div>
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.clock(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${fmtTime(playbackDuration)}</p><p style="font-size:9px;color:#4b5563;">Duration</p></div>
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.activity(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.midiTempo ? `${Math.round(state.midiTempo)} BPM` : '—'}</p><p style="font-size:9px;color:#4b5563;">Tempo</p></div>
+            </div>
+          ` : `
+            <div class="w-stat-box" style="margin-bottom:12px;">
+              <p style="font-size:12px;color:#9ca3af;font-weight:600;">No MIDI yet</p>
+              <p style="font-size:10px;color:#4b5563;margin-top:3px;">Upload or record audio, then convert.</p>
+            </div>
+          `}
           <button id="export-btn" ${state.stage!=='ready'?'disabled':''} style="width:100%;border-radius:12px;padding:10px;display:flex;align-items:center;justify-content:center;gap:8px;background:${state.stage==='ready'?'rgba(59,130,246,0.12)':'rgba(255,255,255,0.03)'};border:${state.stage==='ready'?'1px solid rgba(59,130,246,0.35)':'1px solid rgba(255,255,255,0.06)'};cursor:${state.stage==='ready'?'pointer':'not-allowed'};opacity:${state.stage==='ready'?1:0.35};transition:all 0.3s;">
             ${ICON.download(13,state.stage==='ready'?'#93c5fd':'#4b5563')} <span style="font-size:12px;color:${state.stage==='ready'?'#93c5fd':'#4b5563'};font-weight:500;">Export .mid file</span>
           </button>
@@ -3763,7 +3979,7 @@ function renderDashboard(content) {
                 ? `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`
                 : `${state.noteEditMode && state.stage==='ready'
                   ? `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`
-                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Demo preview'}</span>`}`}
+                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Waiting for MIDI'}</span>`}`}
             </div>
           </div>
         </div>
@@ -3844,6 +4060,7 @@ function renderDashboard(content) {
   content.querySelector('#rec-btn').addEventListener('click', _handleRecord);
   content.querySelector('#upload-btn').addEventListener('click', () => content.querySelector('#file-input').click());
   content.querySelector('#file-input').addEventListener('change', _handleUpload);
+  content.querySelector('#clear-audio-btn')?.addEventListener('click', () => _clearLoadedAudio(content));
 
   const modelBtn = content.querySelector('#model-btn');
   modelBtn.addEventListener('click', () => {
@@ -3854,9 +4071,14 @@ function renderDashboard(content) {
   });
   content.querySelectorAll('.w-model-opt').forEach(btn => {
     btn.addEventListener('click', () => {
-      state.selectedModel = btn.dataset.model;
-      persistSelectedModel(state.selectedModel);
+      const nextModel = btn.dataset.model;
+      state.selectedModel = nextModel;
+      persistAppSettings();
       state.modelDropdownOpen = false;
+      if (state.stage === 'ready' && (state.audioFile || state.audioEntryId)) {
+        const modelLabel = nextModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+        setStatusMessage(`Model switched to ${modelLabel}. Press Convert to re-transcribe the same audio.`, 'success');
+      }
       renderDashboard(content);
     });
   });
@@ -3973,7 +4195,7 @@ function _updateSeek(content) {
     } else if (state.noteEditMode && state.stage === 'ready') {
       ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
     } else {
-      ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Demo preview'}</span>`;
+      ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Waiting for MIDI'}</span>`;
     }
   }
   if (_pianoRoll) {
@@ -4086,7 +4308,7 @@ async function _midiPlayPause(content) {
     return;
   }
 
-  if (!_sf2Synth && !_sf2UnavailableReason) {
+  if (state.preferSf2Playback && !_sf2Synth && !_sf2UnavailableReason) {
     try {
       await ensureSf2SynthReady();
       setStatusMessage('Playback using Full Grand Piano.sf2.', 'success');
@@ -4322,23 +4544,33 @@ function _updateProcessingUI(content) {
   if (label) label.textContent = _getProcessingLabel(progress);
 
   content.querySelectorAll('[data-step]').forEach((el, i) => {
-    const thresholds = [18, 48, 76];
-    const ok = progress >= thresholds[i];
-    el.style.background = ok ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.04)';
-    el.style.border = `1px solid ${ok ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}`;
+    const start = i === 0 ? 0 : PROCESS_STEP_BOUNDS[i - 1];
+    const end = PROCESS_STEP_BOUNDS[i];
+    const done = progress >= end;
+    const active = !done && progress >= start;
+    el.style.background = done
+      ? 'rgba(16,185,129,0.12)'
+      : active
+        ? 'rgba(139,92,246,0.16)'
+        : 'rgba(255,255,255,0.04)';
+    el.style.border = `1px solid ${done
+      ? 'rgba(16,185,129,0.25)'
+      : active
+        ? 'rgba(139,92,246,0.35)'
+        : 'rgba(255,255,255,0.06)'}`;
     const dot = el.querySelector('div');
     const sp = el.querySelector('span');
-    if (dot) dot.style.background = ok ? '#10b981' : '#374151';
-    if (sp) sp.style.color = ok ? '#6ee7b7' : '#4b5563';
+    if (dot) dot.style.background = done ? '#10b981' : active ? '#8b5cf6' : '#374151';
+    if (sp) sp.style.color = done ? '#6ee7b7' : active ? '#ddd6fe' : '#4b5563';
   });
 }
 
 function _getProcessingLabel(progress) {
-  if (progress < 18) return 'Uploading audio...';
-  if (progress < 48) return 'Detecting piano onsets...';
-  if (progress < 76) return 'Analyzing notes and timing...';
-  if (progress < 96) return 'Mapping notes to MIDI...';
-  return 'Finalizing MIDI...';
+  const modelName = state.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  if (progress < PROCESS_STEP_BOUNDS[0]) return 'Uploading and validating audio';
+  if (progress < PROCESS_STEP_BOUNDS[1]) return `${modelName}: transcribing notes and timing`;
+  if (progress < 98) return 'Building MIDI events';
+  return 'Finalizing export';
 }
 
 function _getEstimatedProcessingMs(audioFile) {
@@ -4346,6 +4578,36 @@ function _getEstimatedProcessingMs(audioFile) {
   const modelMultiplier = state.selectedModel === 'onsets_and_frames' ? 1.45 : 1;
   const estimated = 9000 + (sizeMb * 4200 * modelMultiplier);
   return Math.max(14000, Math.min(90000, estimated));
+}
+
+function _clearLoadedAudio(content) {
+  if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+    try { _mediaRecorder.stop(); } catch (_) {}
+  }
+  _stopRecordingWaveform();
+  state.isRecording = false;
+  if (_recTimer) clearTimeout(_recTimer);
+
+  if (_audioUrlRef) {
+    URL.revokeObjectURL(_audioUrlRef);
+    _audioUrlRef = null;
+  }
+
+  resetMidiData();
+  state.audioUrl = null;
+  state.audioFile = null;
+  state.fileName = null;
+  state.audioEntryId = null;
+  state.stage = 'idle';
+  state.modelDropdownOpen = false;
+  clearStatusMessage();
+
+  try {
+    localStorage.removeItem(STORAGE_KEYS.lastAudioId);
+  } catch (_) {}
+
+  setStatusMessage('Audio removed. Upload or record a new file.', 'success');
+  renderDashboard(content);
 }
 
 async function _handleRecord() {
@@ -4390,6 +4652,8 @@ async function _handleRecord() {
         }
 
         const durationMs = Math.max(0, Date.now() - _recordingStartedAt);
+        let loadMessage = `Saved locally: ${recordedFile.name}`;
+        let loadType = 'success';
         try {
           const entry = await saveAudioEntry({
             blob,
@@ -4400,7 +4664,6 @@ async function _handleRecord() {
           localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
           resetMidiData();
           applyAudioEntryToState(entry);
-          clearStatusMessage();
         } catch (error) {
           if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
           _audioUrlRef = URL.createObjectURL(blob);
@@ -4410,10 +4673,18 @@ async function _handleRecord() {
           state.fileName = recordedFile.name;
           state.audioEntryId = null;
           state.stage = 'loaded';
-          setStatusMessage('Recording stored in memory only (browser storage failed).', 'error');
+          loadMessage = 'Recording stored in memory only (browser storage failed).';
+          loadType = 'error';
         }
 
-        renderDashboard(content);
+        if (state.autoConvert) {
+          setStatusMessage(`${loadMessage} Auto-convert started.`, loadType);
+          renderDashboard(content);
+          await _handleConvert(content);
+        } else {
+          setStatusMessage(loadMessage, loadType);
+          renderDashboard(content);
+        }
       };
       _mediaRecorder.start();
       state.isRecording = true;
@@ -4446,6 +4717,8 @@ async function _handleUpload(e) {
   }
 
   resetMidiData();
+  let loadMessage = `Saved locally: ${file.name}`;
+  let loadType = 'success';
   try {
     const entry = await saveAudioEntry({
       blob: file,
@@ -4455,7 +4728,6 @@ async function _handleUpload(e) {
     });
     localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
     applyAudioEntryToState(entry);
-    clearStatusMessage();
   } catch (error) {
     if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
     _audioUrlRef = URL.createObjectURL(file);
@@ -4464,18 +4736,24 @@ async function _handleUpload(e) {
     state.fileName = file.name;
     state.audioEntryId = null;
     state.stage = 'loaded';
-    setStatusMessage('Saved in memory only (browser storage failed).', 'error');
+    loadMessage = 'Saved in memory only (browser storage failed).';
+    loadType = 'error';
   }
   e.target.value = '';
 
   const content = document.getElementById('w-content');
-  renderDashboard(content);
-  setStatusMessage(`Saved locally: ${file.name}`, 'success');
-  renderDashboard(content);
+  if (state.autoConvert) {
+    setStatusMessage(`${loadMessage} Auto-convert started.`, loadType);
+    renderDashboard(content);
+    await _handleConvert(content);
+  } else {
+    setStatusMessage(loadMessage, loadType);
+    renderDashboard(content);
+  }
 }
 
 async function _handleConvert(content) {
-  if (state.stage !== 'loaded') return;
+  if (state.stage === 'processing') return;
   const audioFile = await resolveAudioForTranscription();
   if (!audioFile) {
     setStatusMessage('Select or record an audio file first.', 'error');
@@ -4536,11 +4814,13 @@ async function _handleConvert(content) {
     }
 
     await _applyMidiBlob(midiBlob, 'MIDI conversion complete.');
+    notifyConversionEvent('WidiAI conversion complete', `${audioFile.name || 'Audio file'} was converted to MIDI.`);
     renderDashboard(content);
   } catch (error) {
     state.stage = 'loaded';
     state.progress = 0;
     setStatusMessage(`Conversion error: ${error.message}`, 'error');
+    notifyConversionEvent('WidiAI conversion failed', String(error.message || 'Unknown conversion error.'));
     renderDashboard(content);
   } finally {
     if (_progressTimer) {
@@ -4644,113 +4924,345 @@ function renderSettings(content) {
   destroyInstances();
   const s = state;
 
-  const tgl = (id, val) => `<button class="w-toggle" data-tgl="${id}" style="background:${val?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.1)'};border:${val?'none':'1px solid rgba(255,255,255,0.15)'};box-shadow:${val?'0 0 10px rgba(139,92,246,0.4)':'none'};"><div class="w-toggle-thumb" style="left:${val?'20px':'2px'};"></div></button>`;
-  const sel = (id, val, opts) => `<select class="w-select" data-sel="${id}">${opts.map(o=>`<option${o===val?' selected':''}>${o}</option>`).join('')}</select>`;
+  const tgl = (id, val) => `<button class="w-toggle" data-setting-toggle="${id}" style="background:${val ? 'linear-gradient(135deg,#3b82f6,#8b5cf6)' : 'rgba(255,255,255,0.1)'};border:${val ? 'none' : '1px solid rgba(255,255,255,0.15)'};box-shadow:${val ? '0 0 10px rgba(139,92,246,0.4)' : 'none'};"><div class="w-toggle-thumb" style="left:${val ? '20px' : '2px'};"></div></button>`;
   const vp = ((s.velocitySensitivity) / 127) * 100;
+  const activeModelLabel = s.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  const apiHint = `${normalizeApiUrl(s.apiUrl)}/transcribe`;
 
   content.innerHTML = `
     <div class="w-settings">
       <div class="w-settings-inner">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-          <div><h1 style="font-size:20px;font-weight:700;color:#f0f0f8;line-height:1;">Settings</h1><p style="font-size:12px;color:#6b7280;margin-top:4px;">Configure audio, model, and export preferences</p></div>
-          <div style="display:flex;gap:8px;">
-            <button id="reset-btn" style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);cursor:pointer;font-size:12px;color:#9ca3af;">${ICON.rotateCcw(13,'#9ca3af')} Reset to defaults</button>
-            <button id="save-btn" style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:12px;background:${s.settingsSaved?'rgba(16,185,129,0.2)':'linear-gradient(135deg,#3b82f6,#8b5cf6)'};border:${s.settingsSaved?'1px solid rgba(16,185,129,0.35)':'none'};cursor:pointer;font-size:12px;color:${s.settingsSaved?'#6ee7b7':'white'};font-weight:600;box-shadow:${s.settingsSaved?'none':'0 0 16px rgba(139,92,246,0.4)'};">${s.settingsSaved?ICON.checkCircle(13,'#6ee7b7'):ICON.sliders(13,'white')} ${s.settingsSaved?'Saved!':'Save Changes'}</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;">
+          <div>
+            <h1 style="font-size:20px;font-weight:700;color:#f0f0f8;line-height:1;">Settings</h1>
+            <p style="font-size:12px;color:#6b7280;margin-top:4px;">Basic controls that are directly connected to conversion and playback.</p>
+            <p style="font-size:11px;color:#4b5563;margin-top:4px;">Changes are saved automatically.</p>
           </div>
+          <button id="settings-reset" style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);cursor:pointer;font-size:12px;color:#9ca3af;">
+            ${ICON.rotateCcw(13,'#9ca3af')} Reset Defaults
+          </button>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.mic(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Audio Input</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Input Device</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Select your recording microphone or audio interface</p></div>${sel('inputDevice',s.inputDevice,['Default Microphone','Built-in Microphone','USB Audio Interface','Line In'])}</div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.cpu(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Transcription</span></div>
+          <div class="w-setting-row" style="align-items:flex-start;">
+            <div style="min-width:0;">
+              <p style="font-size:12px;color:#d1d5db;font-weight:500;">Backend API URL</p>
+              <p style="font-size:11px;color:#4b5563;margin-top:2px;">Used for conversion requests.</p>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;min-width:min(420px,100%);">
+              <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+                <input id="settings-api-url" type="text" value="${normalizeApiUrl(s.apiUrl)}" style="width:min(360px,55vw);padding:8px 10px;border-radius:10px;background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.12);color:#d1d5db;font-size:12px;outline:none;">
+                <button id="settings-api-save" style="padding:8px 12px;border-radius:10px;background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.32);color:#93c5fd;font-size:11px;font-weight:600;cursor:pointer;">Save</button>
+                <button id="settings-api-test" style="padding:8px 12px;border-radius:10px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#d1d5db;font-size:11px;font-weight:600;cursor:pointer;">Test</button>
+              </div>
+              <p id="settings-api-status" style="font-size:11px;color:#4b5563;max-width:420px;text-align:right;">Current endpoint: ${apiHint}</p>
+            </div>
+          </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Sample Rate</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Higher rates capture more audio detail</p></div>${sel('sampleRate',s.sampleRate,['22050 Hz','44100 Hz','48000 Hz','96000 Hz'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Bit Depth</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Audio resolution per sample</p></div>${sel('bitDepth',s.bitDepth,['16-bit','24-bit','32-bit float'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Noise Reduction</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Automatically filter background noise</p></div>${tgl('noiseReduction',s.noiseReduction)}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-trim Silence</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Remove leading and trailing silence</p></div>${tgl('silenceTrim',s.silenceTrim)}</div>
-        </div>
-
-        <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.cpu(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">AI Model Preferences</span></div>
           <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Model</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model used for new conversion sessions</p></div>
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Model</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Active model for new conversions.</p></div>
             <div style="display:flex;gap:8px;">
-              <button class="w-model-pill" data-pill="TransKun" style="${s.defaultModel==='TransKun'?'background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.4);color:#c4b5fd;':''}">${ICON.cpu(13,s.defaultModel==='TransKun'?'#a78bfa':'#6b7280')} TransKun ${s.defaultModel==='TransKun'?ICON.checkCircle(11,'#a78bfa'):''}</button>
-              <button class="w-model-pill" data-pill="Onsets & Frames" style="${s.defaultModel==='Onsets & Frames'?'background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.35);color:#93c5fd;':''}">${ICON.activity(13,s.defaultModel==='Onsets & Frames'?'#60a5fa':'#6b7280')} Onsets & Frames ${s.defaultModel==='Onsets & Frames'?ICON.checkCircle(11,'#60a5fa'):''}</button>
+              <button class="w-model-pill" data-setting-model="transkun" style="${s.selectedModel === 'transkun' ? 'background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.4);color:#c4b5fd;' : ''}">${ICON.cpu(13, s.selectedModel === 'transkun' ? '#a78bfa' : '#6b7280')} TransKun ${s.selectedModel === 'transkun' ? ICON.checkCircle(11,'#a78bfa') : ''}</button>
+              <button class="w-model-pill" data-setting-model="onsets_and_frames" style="${s.selectedModel === 'onsets_and_frames' ? 'background:rgba(59,130,246,0.18);border-color:rgba(59,130,246,0.35);color:#93c5fd;' : ''}">${ICON.activity(13, s.selectedModel === 'onsets_and_frames' ? '#60a5fa' : '#6b7280')} Onsets & Frames ${s.selectedModel === 'onsets_and_frames' ? ICON.checkCircle(11,'#60a5fa') : ''}</button>
             </div>
           </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Processing Quality</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Higher quality increases accuracy but takes longer</p></div>
-            <div style="display:flex;gap:4px;padding:4px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);">
-              ${['Standard','High','Ultra'].map(q=>`<button class="w-quality-tab${s.processingQuality===q?' active':''}" data-q="${q}">${q}</button>`).join('')}
-            </div>
-          </div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert on Upload</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Start conversion immediately after file upload</p></div>${tgl('autoConvert',s.autoConvert)}</div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert After Upload / Recording</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Starts conversion immediately when audio is loaded.</p></div>${tgl('autoConvert', s.autoConvert)}</div>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.music2(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">MIDI Export</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Format</p></div>${sel('defaultFormat',s.defaultFormat,['MIDI Type 0','MIDI Type 1','MIDI Type 2'])}</div>
-          <div class="w-divider"></div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.music2(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Playback</span></div>
           <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Velocity Sensitivity</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">How strongly note dynamics are mapped to MIDI velocity</p></div>
-            <div style="display:flex;align-items:center;gap:12px;">
-              <input type="range" class="w-slider" data-sl="velocitySensitivity" min="0" max="127" step="1" value="${s.velocitySensitivity}" style="background:linear-gradient(to right,#8b5cf6 ${vp}%,rgba(255,255,255,0.1) ${vp}%);">
-              <span id="vel-disp" style="font-size:12px;color:#a78bfa;min-width:40px;text-align:right;">${s.velocitySensitivity}</span>
-            </div>
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Use Full Grand Piano.sf2</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">When enabled, playback uses the SF2 soundfont when available.</p></div>
+            ${tgl('preferSf2Playback', s.preferSf2Playback)}
           </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Quantization</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Snap notes to the nearest beat subdivision</p></div>${sel('quantization',s.quantization,['Off','1/32','1/16','1/8','1/4'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Include Sustain Pedal</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Detect and export sustain pedal events (CC64)</p></div>${tgl('includeSustain',s.includeSustain)}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Automatic Tempo Detection</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Analyse audio to estimate BPM and set MIDI tempo</p></div>${tgl('tempoDetection',s.tempoDetection)}</div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Playback Dynamics</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Scales note velocity for preview and MIDI playback.</p></div>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <input type="range" class="w-slider" id="settings-velocity" min="0" max="127" step="1" value="${s.velocitySensitivity}" style="background:linear-gradient(to right,#8b5cf6 ${vp}%,rgba(255,255,255,0.1) ${vp}%);">
+              <span id="settings-velocity-disp" style="font-size:12px;color:#a78bfa;min-width:40px;text-align:right;">${s.velocitySensitivity}</span>
+            </div>
+          </div>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.sliders(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">App Preferences</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-save Conversions</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Automatically save completed MIDI files to history</p></div>${tgl('autoSave',s.autoSave)}</div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.bell(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Notifications</span></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Browser Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Notify when conversion succeeds or fails.</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13, s.notificationsOn ? '#a78bfa' : '#4b5563')}${tgl('notificationsOn', s.notificationsOn)}</div></div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Conversion Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Get notified when processing is complete</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13,s.notificationsOn?'#a78bfa':'#4b5563')}${tgl('notificationsOn',s.notificationsOn)}</div></div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Storage Limit</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Maximum space allocated for conversion history</p></div>${sel('storageLimit',s.storageLimit,['1 GB','2 GB','5 GB','10 GB','Unlimited'])}</div>
-        </div>
-
-        <div class="w-section-card" style="background:rgba(255,255,255,0.015);">
-          <div style="display:flex;align-items:start;justify-content:space-between;">
-            <div style="display:flex;align-items:center;gap:12px;">
-              <div style="width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:0 0 20px rgba(139,92,246,0.35);">${ICON.waves(20,'white')}</div>
-              <div><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;font-weight:700;color:#f0f0f8;">WidiAI</span><span class="w-beta">BETA</span></div><p style="font-size:11px;color:#6b7280;">Wave MIDI AI · Version 0.9.2</p></div>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:6px;text-align:right;">
-              ${[['gauge','TransKun v2.1'],['activity','Onsets & Frames v1.14'],['hardDrive','Storage: browser IndexedDB'],['shield','Processing runs on backend']].map(([ic,tx])=>`<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;"><span style="color:#4b5563;">${ICON[ic](11,'#4b5563')}</span><span style="font-size:11px;color:#4b5563;">${tx}</span></div>`).join('')}
-            </div>
-          </div>
-          <div class="w-divider"></div>
-          <div style="display:flex;align-items:center;gap:8px;">${ICON.info(12,'#4b5563')}<p style="font-size:11px;color:#4b5563;">WidiAI uses state-of-the-art transformer and frame-based models to convert piano audio to MIDI. Audio is stored in your browser and sent to the backend only when you request transcription.</p></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · SF2: ${s.preferSf2Playback ? 'On' : 'Off'}</p></div></div>
         </div>
       </div>
     </div>`;
 
-  // Bind all settings events
-  content.querySelectorAll('[data-tgl]').forEach(btn => btn.addEventListener('click', () => { s[btn.dataset.tgl] = !s[btn.dataset.tgl]; renderSettings(content); }));
-  content.querySelectorAll('[data-sel]').forEach(sel => sel.addEventListener('change', () => { s[sel.dataset.sel] = sel.value; }));
-  content.querySelectorAll('[data-pill]').forEach(btn => btn.addEventListener('click', () => { s.defaultModel = btn.dataset.pill; renderSettings(content); }));
-  content.querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { s.processingQuality = btn.dataset.q; renderSettings(content); }));
-  content.querySelector('[data-sl]')?.addEventListener('input', e => {
-    s.velocitySensitivity = parseInt(e.target.value);
-    const disp = content.querySelector('#vel-disp'); if (disp) disp.textContent = s.velocitySensitivity;
+  const apiInput = content.querySelector('#settings-api-url');
+  const apiStatus = content.querySelector('#settings-api-status');
+
+  const applyApiUrl = () => {
+    s.apiUrl = normalizeApiUrl(apiInput.value);
+    persistAppSettings();
+    apiInput.value = s.apiUrl;
+    if (apiStatus) apiStatus.textContent = `Current endpoint: ${s.apiUrl}/transcribe`;
+  };
+
+  content.querySelector('#settings-api-save')?.addEventListener('click', applyApiUrl);
+  apiInput?.addEventListener('blur', applyApiUrl);
+  apiInput?.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    applyApiUrl();
+  });
+
+  content.querySelector('#settings-api-test')?.addEventListener('click', async (e) => {
+    applyApiUrl();
+    const button = e.currentTarget;
+    if (button) button.disabled = true;
+    if (apiStatus) apiStatus.textContent = `Testing connection to ${s.apiUrl}...`;
+    try {
+      const response = await fetch(`${s.apiUrl}/`, { method: 'GET' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (apiStatus) apiStatus.textContent = `Connection successful: ${s.apiUrl}`;
+      if (apiStatus) apiStatus.style.color = '#6ee7b7';
+    } catch (error) {
+      if (apiStatus) apiStatus.textContent = `Connection failed: ${error.message}`;
+      if (apiStatus) apiStatus.style.color = '#fca5a5';
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
+  content.querySelectorAll('[data-setting-model]').forEach(btn => btn.addEventListener('click', () => {
+    const nextModel = normalizeModelId(btn.dataset.settingModel);
+    if (!nextModel || nextModel === s.selectedModel) return;
+    s.selectedModel = nextModel;
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelectorAll('[data-setting-toggle]').forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.settingToggle;
+    if (!['autoConvert', 'notificationsOn', 'preferSf2Playback'].includes(key)) return;
+    s[key] = !s[key];
+    if (key === 'preferSf2Playback' && !s.preferSf2Playback) {
+      disposeSf2Synth();
+      _sf2UnavailableReason = '';
+    }
+    if (key === 'preferSf2Playback' && s.preferSf2Playback) {
+      _sf2UnavailableReason = '';
+    }
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelector('#settings-velocity')?.addEventListener('input', e => {
+    s.velocitySensitivity = Math.round(clampSettingNumber(e.target.value, 0, 127, DEFAULT_SETTINGS.velocitySensitivity));
+    const disp = content.querySelector('#settings-velocity-disp');
+    if (disp) disp.textContent = s.velocitySensitivity;
     const p = (s.velocitySensitivity / 127) * 100;
     e.target.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
   });
-  content.querySelector('#save-btn').addEventListener('click', () => { s.settingsSaved = true; renderSettings(content); setTimeout(() => { s.settingsSaved = false; renderSettings(content); }, 2500); });
-  content.querySelector('#reset-btn').addEventListener('click', () => {
-    Object.assign(s, { inputDevice: 'Default Microphone', sampleRate: '44100 Hz', bitDepth: '24-bit', noiseReduction: true, silenceTrim: true, defaultModel: 'TransKun', processingQuality: 'High', autoConvert: false, velocitySensitivity: 80, quantization: '1/16', includeSustain: true, defaultFormat: 'MIDI Type 1', tempoDetection: true, autoSave: true, notificationsOn: true, storageLimit: '5 GB' });
+
+  content.querySelector('#settings-velocity')?.addEventListener('change', () => {
+    persistAppSettings();
+  });
+
+  content.querySelector('#settings-reset')?.addEventListener('click', () => {
+    Object.assign(s, {
+      apiUrl: normalizeApiUrl(getDefaultApiUrlValue()),
+      selectedModel: 'transkun',
+      autoConvert: DEFAULT_SETTINGS.autoConvert,
+      velocitySensitivity: DEFAULT_SETTINGS.velocitySensitivity,
+      notificationsOn: DEFAULT_SETTINGS.notificationsOn,
+      preferSf2Playback: DEFAULT_SETTINGS.preferSf2Playback,
+    });
+    _sf2UnavailableReason = '';
+    persistAppSettings();
     renderSettings(content);
+  });
+}
+
+function renderHome(content) {
+  destroyInstances();
+  const featureCards = [
+    { icon: ICON.mic(24, '#ffffff'), title: 'Live Recording', description: 'Record directly from your microphone or audio interface with real-time monitoring' },
+    { icon: ICON.fileAudio(24, '#ffffff'), title: 'File Upload', description: 'Support for WAV, MP3, MP4, and other common audio formats' },
+    { icon: ICON.cpu(24, '#ffffff'), title: 'AI-Powered', description: 'Advanced neural networks (TransKun, Onsets & Frames) for accurate transcription' },
+    { icon: ICON.music2(24, '#ffffff'), title: 'MIDI Export', description: 'Download professional-quality MIDI files compatible with all DAWs' },
+    { icon: ICON.waves(24, '#ffffff'), title: 'Visual Feedback', description: 'See your audio waveform and MIDI piano roll side-by-side' },
+    { icon: ICON.sliders(24, '#ffffff'), title: 'Customizable', description: 'Adjust sensitivity, velocity, and other parameters for perfect results' },
+  ];
+
+  const processSteps = [
+    { step: '01', num: 1, title: 'Upload or Record', description: 'Choose an audio file from your device or record live piano performance using your microphone' },
+    { step: '02', num: 2, title: 'AI Processing', description: 'Our advanced neural network analyzes your audio and detects every note, timing, and velocity' },
+    { step: '03', num: 3, title: 'Download MIDI', description: 'Review the results in the piano roll and download your MIDI file ready for any DAW' },
+  ];
+
+  const waveformBars = [46, 38, 74, 54, 61, 33, 79, 44, 52, 68, 36, 63, 57, 49, 72, 41, 67, 39, 84, 47, 58, 34, 76, 51, 66, 42, 70, 48, 55, 37, 81, 45, 62, 40, 73, 53, 60, 43, 78, 50];
+  const midiRows = [
+    { label: 'C6', width: 78 },
+    { label: 'B5', width: 62 },
+    { label: 'A5', width: 86 },
+    { label: 'G5', width: 58 },
+    { label: 'F5', width: 72 },
+  ];
+
+  content.innerHTML = `
+    <div style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 0 32px;">
+      <section style="padding:74px 28px 80px;text-align:center;position:relative;z-index:1;">
+        <div style="max-width:900px;margin:0 auto;">
+          <div style="display:inline-block;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.35);border-radius:24px;padding:8px 18px;margin-bottom:24px;">
+            <span style="color:#c4b5fd;font-size:12px;font-weight:600;letter-spacing:0.08em;">AI-POWERED PIANO TRANSCRIPTION</span>
+          </div>
+          <h1 style="font-size:64px;font-weight:700;color:#f0f0f8;margin-bottom:24px;line-height:1.1;letter-spacing:-0.02em;">
+            Convert Piano Audio<br />
+            <span style="background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">to MIDI Instantly</span>
+          </h1>
+          <p style="font-size:18px;color:#9ca3af;max-width:700px;margin:0 auto 40px;">
+            Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.
+          </p>
+          <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-bottom:20px;">
+            <button type="button" data-home-launch style="padding:16px 32px;border-radius:14px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:white;border:none;font-weight:600;font-size:16px;cursor:pointer;box-shadow:0 8px 24px rgba(139,92,246,0.5),0 2px 0 rgba(255,255,255,0.15) inset;">
+              Launch WidiAI
+            </button>
+            <button type="button" data-home-scroll="how-it-works" style="padding:16px 32px;border-radius:14px;background:rgba(255,255,255,0.04);color:#e5e7eb;border:1px solid rgba(255,255,255,0.1);font-weight:600;font-size:16px;cursor:pointer;">
+              Learn More
+            </button>
+          </div>
+          <p style="font-size:12px;color:#6b7280;">No registration required • Works locally • Browser-based workflow</p>
+        </div>
+
+        <div style="max-width:1000px;margin:60px auto 0;border-radius:20px;overflow:hidden;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.35);">
+          <div style="background:rgba(0,0,0,0.4);border-bottom:1px solid rgba(255,255,255,0.06);padding:12px 18px;display:flex;gap:8px;">
+            <div style="width:12px;height:12px;border-radius:50%;background:#ef4444;"></div>
+            <div style="width:12px;height:12px;border-radius:50%;background:#f59e0b;"></div>
+            <div style="width:12px;height:12px;border-radius:50%;background:#10b981;"></div>
+          </div>
+          <div style="padding:32px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;">
+            <div style="background:rgba(0,0,0,0.4);border-radius:14px;padding:20px;border:1px solid rgba(255,255,255,0.08);">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                ${ICON.waves(20, '#60a5fa')}
+                <span style="color:#e5e7eb;font-weight:600;font-size:14px;">Audio Waveform</span>
+              </div>
+              <div style="height:80px;display:flex;align-items:end;gap:3px;">
+                ${waveformBars.map(height => `<div style="flex:1;background:linear-gradient(180deg,#60a5fa,#3b82f6);border-radius:2px 2px 0 0;height:${height}%;box-shadow:0 0 6px rgba(59,130,246,0.4);"></div>`).join('')}
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.4);border-radius:14px;padding:20px;border:1px solid rgba(255,255,255,0.08);">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+                ${ICON.music2(20, '#a78bfa')}
+                <span style="color:#e5e7eb;font-weight:600;font-size:14px;">MIDI Notes</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                ${midiRows.map(row => `
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="width:40px;color:#6b7280;font-size:11px;">${row.label}</div>
+                    <div style="height:18px;background:linear-gradient(90deg,#a78bfa,#8b5cf6);border-radius:4px;width:${row.width}%;box-shadow:0 0 10px rgba(139,92,246,0.5);"></div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" style="padding:80px 28px;position:relative;z-index:1;">
+        <div style="text-align:center;margin-bottom:64px;">
+          <h2 style="font-size:42px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">Powerful Features</h2>
+          <p style="font-size:18px;color:#6b7280;">Everything you need for piano transcription</p>
+        </div>
+        <div style="max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;">
+          ${featureCards.map(feature => `
+            <article style="border-radius:20px;padding:28px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
+              <div style="width:52px;height:52px;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;margin-bottom:18px;box-shadow:0 4px 12px rgba(139,92,246,0.4);">${feature.icon}</div>
+              <h3 style="font-size:18px;font-weight:700;color:#f0f0f8;margin-bottom:10px;">${feature.title}</h3>
+              <p style="font-size:14px;color:#9ca3af;line-height:1.6;">${feature.description}</p>
+            </article>
+          `).join('')}
+        </div>
+      </section>
+
+      <section id="how-it-works" style="padding:80px 28px;position:relative;z-index:1;">
+        <div style="text-align:center;margin-bottom:64px;">
+          <h2 style="font-size:42px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">How It Works</h2>
+          <p style="font-size:18px;color:#6b7280;">Three simple steps to get your MIDI file</p>
+        </div>
+        <div style="max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:32px;">
+          ${processSteps.map(item => `
+            <article style="position:relative;">
+              <div style="font-size:120px;font-weight:700;color:rgba(139,92,246,0.08);position:absolute;top:-24px;left:-8px;line-height:1;">${item.step}</div>
+              <div style="position:relative;border-radius:20px;padding:32px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
+                <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;margin-bottom:18px;color:white;font-weight:700;font-size:20px;box-shadow:0 4px 12px rgba(139,92,246,0.4);">${item.num}</div>
+                <h3 style="font-size:24px;font-weight:700;color:#f0f0f8;margin-bottom:12px;">${item.title}</h3>
+                <p style="font-size:14px;color:#9ca3af;line-height:1.6;">${item.description}</p>
+              </div>
+            </article>
+          `).join('')}
+        </div>
+      </section>
+
+      <section id="about" style="padding:80px 28px;position:relative;z-index:1;">
+        <div style="max-width:900px;margin:0 auto;border-radius:20px;padding:48px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset;">
+          <h2 style="font-size:36px;font-weight:700;color:#f0f0f8;margin-bottom:24px;">About WidiAI</h2>
+          <div style="color:#9ca3af;font-size:16px;line-height:1.8;margin-bottom:32px;">
+            <p style="margin-bottom:16px;">WidiAI is a powerful browser-based application that converts piano audio recordings into MIDI files using state-of-the-art AI models.</p>
+            <p style="margin-bottom:16px;">Built with privacy in mind, the workflow runs directly in your browser UI while connecting to your chosen backend transcription model when needed.</p>
+            <p>Whether you're a composer transcribing recordings, a teacher preparing exercises, or a producer working with piano material, WidiAI keeps the process fast and interactive.</p>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;">
+            ${['100% Free', 'No Registration', 'Privacy First'].map(label => `
+              <div style="display:flex;align-items:center;gap:10px;color:#93c5fd;font-weight:600;">
+                ${ICON.checkCircle(18, '#93c5fd')}
+                <span>${label}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </section>
+
+      <section style="padding:80px 28px 120px;position:relative;z-index:1;">
+        <div style="max-width:900px;margin:0 auto;text-align:center;border-radius:20px;padding:64px 48px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:0 16px 48px rgba(139,92,246,0.5);">
+          <h2 style="font-size:42px;font-weight:700;color:white;margin-bottom:16px;">Ready to get started?</h2>
+          <p style="font-size:18px;color:rgba(255,255,255,0.9);margin-bottom:32px;">Start converting your piano recordings to MIDI in seconds.</p>
+          <button type="button" data-home-launch style="padding:16px 40px;border-radius:14px;background:white;color:#3b82f6;border:none;font-weight:700;font-size:16px;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,0.2);">
+            Launch WidiAI Now
+          </button>
+        </div>
+      </section>
+
+      <footer style="border-top:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));padding:24px 28px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);box-shadow:0 4px 12px rgba(139,92,246,0.4);display:flex;align-items:center;justify-content:center;">${ICON.waves(16, '#ffffff')}</div>
+            <div>
+              <p style="color:#f0f0f8;font-weight:600;font-size:14px;">WidiAI</p>
+              <p style="font-size:10px;color:#6b7280;">Wave MIDI AI</p>
+            </div>
+          </div>
+          <p style="color:#6b7280;font-size:12px;">© 2026 WidiAI. All rights reserved.</p>
+        </div>
+      </footer>
+    </div>`;
+
+  const go = (page) => {
+    state.page = page;
+    _syncNavButtons();
+    renderPage(content);
+  };
+
+  content.querySelectorAll('[data-home-launch]').forEach(btn => {
+    btn.addEventListener('click', () => go('dashboard'));
+  });
+
+  content.querySelectorAll('[data-home-scroll]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.dataset.homeScroll;
+      const target = targetId ? content.querySelector(`#${targetId}`) : null;
+      if (target && typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
   });
 }
 
@@ -4758,8 +5270,15 @@ function renderSettings(content) {
 // ROUTER + LAYOUT + INIT
 // ═══════════════════════════════════════════════════════════════════
 
+function _syncNavButtons() {
+  document.querySelectorAll('.w-nav-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.nav === state.page);
+  });
+}
+
 function renderPage(content) {
-  if (state.page === 'dashboard') renderDashboard(content);
+  if (state.page === 'home') renderHome(content);
+  else if (state.page === 'dashboard') renderDashboard(content);
   else if (state.page === 'history') renderHistory(content);
   else if (state.page === 'settings') renderSettings(content);
 }
@@ -4769,7 +5288,7 @@ export function init(container) {
   container.className = 'widi-app';
   bindAudioUnlock();
   bindTransportShortcuts();
-  persistSelectedModel(state.selectedModel);
+  persistAppSettings();
 
   // Background glow orbs
   const orbLayer = document.createElement('div');
@@ -4797,14 +5316,15 @@ export function init(container) {
       </div>
     </div>
     <nav class="w-nav">
-      <button class="w-nav-btn active" data-nav="dashboard">Dashboard</button>
+      <button class="w-nav-btn active" data-nav="home">Home</button>
+      <button class="w-nav-btn" data-nav="dashboard">Dashboard</button>
       <button class="w-nav-btn" data-nav="history">History</button>
       <button class="w-nav-btn" data-nav="settings">Settings</button>
     </nav>`;
   header.querySelectorAll('[data-nav]').forEach(btn => {
     btn.addEventListener('click', () => {
       state.page = btn.dataset.nav;
-      header.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === state.page));
+      _syncNavButtons();
       renderPage(content);
     });
   });
