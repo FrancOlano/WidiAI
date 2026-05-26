@@ -3125,12 +3125,17 @@ class ScoreEditor {
     this.fingerSuggestionSignature = '';
     this.nextFingerSuggestionScanAt = 0;
     this.animId = 0;
+    this.viewportW = 0;
+    this.scrollRatio = 0;
 
     this.container.style.overflow = 'hidden';
+    this.scrollHost = document.createElement('div');
+    this.scrollHost.className = 'w-roll-scroll w-score-scroll';
+    this.container.appendChild(this.scrollHost);
+
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'display:block;width:100%;height:100%;';
-    this.container.appendChild(this.canvas);
-    this.setZoom(this.zoomX, this.zoomY);
+    this.scrollHost.appendChild(this.canvas);
 
     this._ro = new ResizeObserver(() => this._setup());
     this._ro.observe(container);
@@ -3336,20 +3341,18 @@ class ScoreEditor {
   }
 
   _buildLayout(W, H) {
+    const viewportW = Math.max(240, this.viewportW || W);
     const left = 94;
     const right = 22;
-    const usableW = Math.max(120, W - left - right);
+    const usableW = Math.max(120, viewportW - left - right);
     const totalDuration = this._getTotalDuration();
     const basePxPerSec = usableW / totalDuration;
     const closestSeparationSec = this._getClosestNoteSeparationSec();
-    const targetGapPx = Math.max(12, Math.min(20, W * 0.018));
+    const targetGapPx = Math.max(12, Math.min(20, viewportW * 0.018));
     const adaptivePxPerSec = targetGapPx / closestSeparationSec;
     const maxAdaptivePxPerSec = basePxPerSec * 1.65;
     const baseSpacingPxPerSec = Math.min(maxAdaptivePxPerSec, Math.max(basePxPerSec, adaptivePxPerSec));
     const pxPerSec = baseSpacingPxPerSec * this.zoomX;
-    const playheadX = left + (usableW * 0.34);
-    const visiblePastSec = (playheadX - left) / pxPerSec;
-    const visibleFutureSec = ((W - right) - playheadX) / pxPerSec;
 
     const baseLineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
     const lineGap = Math.max(8, Math.min(24, baseLineGap * this.zoomY));
@@ -3365,9 +3368,6 @@ class ScoreEditor {
       totalDuration,
       closestSeparationSec,
       pxPerSec,
-      playheadX,
-      visiblePastSec,
-      visibleFutureSec,
       lineGap,
       staffTop,
       yE4,
@@ -3386,12 +3386,12 @@ class ScoreEditor {
 
   _timeToX(time, layout) {
     const resolvedTime = Math.max(0, Number(time) || 0);
-    return layout.playheadX + (resolvedTime - this.currentTime) * layout.pxPerSec;
+    return layout.left + (resolvedTime * layout.pxPerSec);
   }
 
   _timeAtX(x, layout) {
     const clamped = Math.max(layout.left, Math.min(this.W - layout.right, x));
-    return Math.max(0, this.currentTime + ((clamped - layout.playheadX) / layout.pxPerSec));
+    return Math.max(0, (clamped - layout.left) / layout.pxPerSec);
   }
 
   _midiAtY(y, layout) {
@@ -3747,8 +3747,10 @@ class ScoreEditor {
     }
 
     const totalSec = layout.totalDuration;
-    const visibleStartSec = Math.max(0, this.currentTime - layout.visiblePastSec - 1);
-    const visibleEndSec = Math.min(totalSec, this.currentTime + layout.visibleFutureSec + 1);
+    const scrollLeft = this.scrollHost ? this.scrollHost.scrollLeft : 0;
+    const viewportW = Math.max(240, this.viewportW || W);
+    const visibleStartSec = Math.max(0, ((scrollLeft - layout.left) / layout.pxPerSec) - 1);
+    const visibleEndSec = Math.min(totalSec, (((scrollLeft + viewportW) - layout.left) / layout.pxPerSec) + 1);
     const firstSec = Math.floor(visibleStartSec);
     const lastSec = Math.ceil(visibleEndSec);
     for (let sec = firstSec; sec <= lastSec; sec += 1) {
@@ -3782,27 +3784,28 @@ class ScoreEditor {
 
     const bracketTop = this._stepToY(TREBLE_LINE_STEPS[0], layout);
     const bracketBottom = this._stepToY(BASS_LINE_STEPS[BASS_LINE_STEPS.length - 1], layout);
+    const fixedAnchorX = layout.left + scrollLeft;
     ctx.strokeStyle = readable ? 'rgba(226,232,240,0.62)' : 'rgba(229,231,235,0.5)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(layout.left - 12, bracketTop);
-    ctx.lineTo(layout.left - 12, bracketBottom);
+    ctx.moveTo(fixedAnchorX - 12, bracketTop);
+    ctx.lineTo(fixedAnchorX - 12, bracketBottom);
     ctx.stroke();
 
     const trebleY = this._stepToY(34, layout);
     const bassY = this._stepToY(22, layout);
     ctx.fillStyle = readable ? 'rgba(203,213,225,0.9)' : 'rgba(221,214,254,0.82)';
     ctx.font = `${Math.max(34, Math.round(layout.lineGap * 3.8))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
-    ctx.fillText('𝄞', layout.left - 54, trebleY + (layout.lineGap * 1.6));
+    ctx.fillText('𝄞', fixedAnchorX - 54, trebleY + (layout.lineGap * 1.6));
     ctx.font = `${Math.max(28, Math.round(layout.lineGap * 3.0))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
-    ctx.fillText('𝄢', layout.left - 52, bassY + (layout.lineGap * 1.25));
+    ctx.fillText('𝄢', fixedAnchorX - 52, bassY + (layout.lineGap * 1.25));
     if (!readable) {
       ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
-      ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
+      ctx.fillText('Treble Clef', scrollLeft + 10, trebleY - (layout.lineGap * 1.8));
+      ctx.fillText('Bass Clef', scrollLeft + 10, bassY - (layout.lineGap * 1.35));
     }
 
-    const playheadX = layout.playheadX;
+    const playheadX = this._timeToX(this.currentTime, layout);
     ctx.strokeStyle = this.isPlaying
       ? (readable ? 'rgba(45,212,191,0.92)' : 'rgba(110,231,183,0.85)')
       : (readable ? 'rgba(148,163,184,0.58)' : 'rgba(167,139,250,0.5)');
@@ -3819,8 +3822,10 @@ class ScoreEditor {
       const x = this._timeToX(note.startTime, layout);
       const duration = Math.max(0.03, Number(note.duration) || 0.12);
       const tailX = x + Math.max(layout.noteHeadW * 1.15, duration * layout.pxPerSec);
+      const visibleMinX = scrollLeft - 40;
+      const visibleMaxX = scrollLeft + viewportW + 40;
 
-      if (x > W + 20 || tailX < layout.left - 20 || y < layout.topY - 26 || y > layout.bottomY + 26) return;
+      if (x > visibleMaxX || tailX < visibleMinX || y < layout.topY - 26 || y > layout.bottomY + 26) return;
 
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
       const selected = selectedByDrag || this._isSelected(index);
@@ -4146,6 +4151,11 @@ class ScoreEditor {
           e.preventDefault();
         }
       },
+      hs: () => {
+        if (!this.scrollHost) return;
+        const maxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+        this.scrollRatio = maxScroll > 0 ? (this.scrollHost.scrollLeft / maxScroll) : 0;
+      },
     };
 
     c.addEventListener('mousedown', this._h.md);
@@ -4154,6 +4164,7 @@ class ScoreEditor {
     c.addEventListener('mouseleave', this._h.ml);
     c.addEventListener('dblclick', this._h.db);
     c.addEventListener('contextmenu', this._h.cm);
+    this.scrollHost.addEventListener('scroll', this._h.hs, { passive: true });
     window.addEventListener('mousemove', this._h.wm);
     window.addEventListener('mouseup', this._h.wu);
     window.addEventListener('blur', this._h.wb);
@@ -4163,15 +4174,28 @@ class ScoreEditor {
   _setup() {
     cancelAnimationFrame(this.animId);
     const dpr = window.devicePixelRatio || 1;
-    const W = this.container.clientWidth || 800;
+    const viewportW = this.container.clientWidth || 800;
     const H = this.container.clientHeight || 330;
+    const widthZoom = Math.max(1, this.zoomX);
+    const W = Math.max(viewportW, Math.round(viewportW * widthZoom));
+    this.viewportW = viewportW;
     this.W = W;
     this.H = H;
+
+    this.scrollHost.classList.toggle('scroll-x', W > viewportW + 2);
     this.canvas.width = W * dpr;
     this.canvas.height = H * dpr;
     this.canvas.style.width = `${W}px`;
     this.canvas.style.height = `${H}px`;
-    this.setZoom(this.zoomX, this.zoomY);
+
+    const nextMaxScroll = Math.max(0, W - viewportW);
+    if (nextMaxScroll > 0) {
+      this.scrollHost.scrollLeft = Math.round(nextMaxScroll * this.scrollRatio);
+    } else {
+      this.scrollHost.scrollLeft = 0;
+      this.scrollRatio = 0;
+    }
+
     const ctx = this.canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const loop = () => {
@@ -4194,11 +4218,20 @@ class ScoreEditor {
   }
 
   setZoom(x, y) {
-    this.zoomX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
-    this.zoomY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
-    if (this.canvas) {
-      this.canvas.style.transformOrigin = 'center center';
-      this.canvas.style.transform = 'none';
+    const nextX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
+    const nextY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
+    const changed = Math.abs(nextX - this.zoomX) > 0.0001 || Math.abs(nextY - this.zoomY) > 0.0001;
+    if (!changed) return;
+
+    if (this.scrollHost) {
+      const oldMaxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+      this.scrollRatio = oldMaxScroll > 0 ? (this.scrollHost.scrollLeft / oldMaxScroll) : 0;
+    }
+
+    this.zoomX = nextX;
+    this.zoomY = nextY;
+    if (this.container && this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+      this._setup();
     }
   }
 
@@ -4254,11 +4287,12 @@ class ScoreEditor {
     c.removeEventListener('mouseleave', this._h.ml);
     c.removeEventListener('dblclick', this._h.db);
     c.removeEventListener('contextmenu', this._h.cm);
+    this.scrollHost.removeEventListener('scroll', this._h.hs);
     window.removeEventListener('mousemove', this._h.wm);
     window.removeEventListener('mouseup', this._h.wu);
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
-    c.remove();
+    this.scrollHost.remove();
   }
 }
 
