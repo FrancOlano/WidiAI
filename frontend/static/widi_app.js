@@ -4,6 +4,16 @@
  * No React · No JSX · No frameworks — plain ES6+ DOM APIs
  */
 
+import { normalizeLang as normalizeI18nLang, translateKey } from './app/i18n_keys.js';
+import {
+  normalizePlaybackProfile,
+  applyPlaybackProfileToNotes,
+  applyProfileToPedalAmount,
+  computeSf2TailMs,
+} from './app/playback_profiles.js';
+import { filterAndSortHistoryEntries, summarizeHistory } from './app/history_utils.js';
+import { formatCompareElapsed, estimateCompareDurationMs, easingProgress } from './app/compare_utils.js';
+
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -76,19 +86,6 @@ function buildMidi() {
 
 const MIDI_NOTES = buildMidi();
 
-const HISTORY = [
-  { id: 1, fileName: 'beethoven_moonlight_sonata.wav', date: '2026-05-04 14:23', model: 'TransKun', duration: '2:47', notes: 342, size: '3.2 MB', status: 'completed' },
-  { id: 2, fileName: 'chopin_nocturne_op9.mp4', date: '2026-05-04 11:08', model: 'Onsets & Frames', duration: '1:32', notes: 198, size: '18.6 MB', status: 'completed' },
-  { id: 3, fileName: 'bach_invention_no1.wav', date: '2026-05-03 16:45', model: 'TransKun', duration: '0:58', notes: 124, size: '1.1 MB', status: 'completed' },
-  { id: 4, fileName: 'piano_improvisation_may3.wav', date: '2026-05-03 09:12', model: 'Onsets & Frames', duration: '3:14', notes: 0, size: '4.7 MB', status: 'failed' },
-  { id: 5, fileName: 'debussy_clair_de_lune.wav', date: '2026-05-02 20:31', model: 'TransKun', duration: '1:48', notes: 267, size: '2.6 MB', status: 'completed' },
-  { id: 6, fileName: 'recording_20260502.wav', date: '2026-05-02 15:17', model: 'TransKun', duration: '0:34', notes: 67, size: '0.8 MB', status: 'completed' },
-  { id: 7, fileName: 'schubert_impromptu_op90.mp4', date: '2026-05-01 22:04', model: 'Onsets & Frames', duration: '4:02', notes: 531, size: '41.2 MB', status: 'completed' },
-  { id: 8, fileName: 'piano_practice_session.wav', date: '2026-05-01 18:55', model: 'TransKun', duration: '1:15', notes: 145, size: '1.8 MB', status: 'completed' },
-  { id: 9, fileName: 'mozart_sonata_k331.wav', date: '2026-04-30 13:40', model: 'TransKun', duration: '3:22', notes: 488, size: '4.9 MB', status: 'completed' },
-  { id: 10, fileName: 'late_night_recording.wav', date: '2026-04-30 01:12', model: 'Onsets & Frames', duration: '0:48', notes: 0, size: '1.1 MB', status: 'failed' },
-];
-
 // ═══════════════════════════════════════════════════════════════════
 // APP STATE
 // ═══════════════════════════════════════════════════════════════════
@@ -99,18 +96,23 @@ const STORAGE_KEYS = {
   apiUrl: 'widi.apiUrl',
   noteGuideOpen: 'widi.noteGuideOpen',
   settings: 'widi.settings.v1',
+  uiLanguage: 'widi.uiLanguage',
 };
 
 const AUDIO_DB = {
   name: 'widi_audio_storage',
-  version: 1,
+  version: 2,
   store: 'audio',
+  historyStore: 'history',
 };
 
 const MODEL_IDS = ['transkun', 'onsets_and_frames'];
 const MAX_RECORDING_MS = 5 * 60 * 1000;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
-const SF2_SOUND_FONT_URL = '/static/soundfonts/full-grand-piano.sf2';
+const SF2_SOUND_FONT_CANDIDATES = [
+  '/static/soundfonts/full-grand-piano.sf2',
+  '/static/soundfonts/Full%20Grand%20Piano.sf2',
+];
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
 
@@ -119,6 +121,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   velocitySensitivity: 80,
   notificationsOn: true,
   preferSf2Playback: true,
+  pedalAssist: true,
+  pedalAssistAmount: 0.72,
+  fingerSuggestionAlgorithm: 'legacy',
+  playbackProfile: 'natural',
 });
 
 const clampSettingNumber = (value, min, max, fallback) => {
@@ -129,8 +135,26 @@ const clampSettingNumber = (value, min, max, fallback) => {
 
 const normalizeModelId = (model) => {
   const value = String(model || '').trim().toLowerCase();
-  if (value === 'onsets' || value === 'own') return 'onsets_and_frames';
+  if (
+    value === 'onsets' ||
+    value === 'own' ||
+    value === 'onsets and frames' ||
+    value === 'onsets & frames' ||
+    value === 'o&f'
+  ) {
+    return 'onsets_and_frames';
+  }
   return MODEL_IDS.includes(value) ? value : '';
+};
+
+const normalizeFingerSuggestionAlgorithm = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'manual') return 'manual';
+  return 'legacy';
+};
+
+const normalizeUiLanguage = (value) => {
+  return normalizeI18nLang(value);
 };
 
 const getDefaultApiUrlValue = () => {
@@ -199,12 +223,18 @@ const getStoredSettings = () => {
       velocitySensitivity: Math.round(clampSettingNumber(parsed.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
       notificationsOn: parsed.notificationsOn !== false,
       preferSf2Playback: parsed.preferSf2Playback !== false,
+      pedalAssist: parsed.pedalAssist !== false,
+      pedalAssistAmount: clampSettingNumber(parsed.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount),
+      fingerSuggestionAlgorithm: normalizeFingerSuggestionAlgorithm(parsed.fingerSuggestionAlgorithm),
+      playbackProfile: normalizePlaybackProfile(parsed.playbackProfile),
     };
   } catch (error) {
     console.warn('Failed to load stored settings:', error);
     return null;
   }
 };
+
+const getStoredUiLanguage = () => normalizeUiLanguage(readLocalStorage(STORAGE_KEYS.uiLanguage));
 
 
 const openAudioDb = () => new Promise((resolve, reject) => {
@@ -220,13 +250,17 @@ const openAudioDb = () => new Promise((resolve, reject) => {
       const store = db.createObjectStore(AUDIO_DB.store, { keyPath: 'id' });
       store.createIndex('createdAt', 'createdAt');
     }
+    if (!db.objectStoreNames.contains(AUDIO_DB.historyStore)) {
+      const historyStore = db.createObjectStore(AUDIO_DB.historyStore, { keyPath: 'id' });
+      historyStore.createIndex('createdAt', 'createdAt');
+    }
   };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
 });
 
 const saveAudioEntry = async ({ blob, name, source, durationMs }) => {
-  const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `audio_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const id = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `audio_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const entry = {
     id,
     name,
@@ -262,6 +296,113 @@ const loadAudioEntry = async (id) => {
     req.onsuccess = () => {
       db.close();
       resolve(req.result || null);
+    };
+    req.onerror = () => {
+      db.close();
+      reject(req.error);
+    };
+  });
+};
+
+const makeEntityId = (prefix) => {
+  if (window.crypto && window.crypto.randomUUID) return `${prefix}_${window.crypto.randomUUID()}`;
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+};
+
+const normalizeHistoryEntry = (entry) => {
+  const status = entry?.status === 'failed' ? 'failed' : 'completed';
+  const modelId = normalizeModelId(entry?.modelId || entry?.model) || 'transkun';
+  const createdAtRaw = String(entry?.createdAt || '');
+  const createdAt = Number.isNaN(Date.parse(createdAtRaw)) ? new Date().toISOString() : createdAtRaw;
+  const notes = Math.max(0, Math.round(Number(entry?.notes) || 0));
+  const durationSec = Number(entry?.durationSec);
+  const normalizedDuration = Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
+  const audioSizeBytes = Math.max(0, Math.round(Number(entry?.audioSizeBytes || entry?.sizeBytes) || 0));
+  const midiSizeBytes = Math.max(0, Math.round(Number(entry?.midiSizeBytes) || 0)) || null;
+
+  return {
+    id: String(entry?.id || makeEntityId('hist')),
+    createdAt,
+    fileName: String(entry?.fileName || entry?.name || 'unknown_audio'),
+    modelId,
+    status,
+    notes,
+    durationSec: normalizedDuration,
+    audioSizeBytes,
+    midiSizeBytes,
+    audioEntryId: entry?.audioEntryId ? String(entry.audioEntryId) : null,
+    errorMessage: entry?.errorMessage ? String(entry.errorMessage) : '',
+    midiBlob: entry?.midiBlob instanceof Blob ? entry.midiBlob : null,
+  };
+};
+
+const listHistoryEntriesFromDb = async () => {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.historyStore, 'readonly');
+    const store = tx.objectStore(AUDIO_DB.historyStore);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      db.close();
+      const rows = Array.isArray(request.result) ? request.result : [];
+      const normalized = rows.map(normalizeHistoryEntry);
+      normalized.sort((a, b) => {
+        const ta = Number.isNaN(Date.parse(a.createdAt)) ? 0 : Date.parse(a.createdAt);
+        const tb = Number.isNaN(Date.parse(b.createdAt)) ? 0 : Date.parse(b.createdAt);
+        return tb - ta;
+      });
+      resolve(normalized);
+    };
+    request.onerror = () => {
+      db.close();
+      reject(request.error);
+    };
+  });
+};
+
+const saveHistoryEntryToDb = async (entry) => {
+  const normalized = normalizeHistoryEntry(entry);
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.historyStore, 'readwrite');
+    tx.oncomplete = () => {
+      db.close();
+      resolve(normalized);
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.objectStore(AUDIO_DB.historyStore).put(normalized);
+  });
+};
+
+const deleteHistoryEntryFromDb = async (id) => {
+  if (!id) return;
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.historyStore, 'readwrite');
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.objectStore(AUDIO_DB.historyStore).delete(id);
+  });
+};
+
+const loadHistoryEntryFromDb = async (id) => {
+  if (!id) return null;
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_DB.historyStore, 'readonly');
+    const req = tx.objectStore(AUDIO_DB.historyStore).get(id);
+    req.onsuccess = () => {
+      db.close();
+      resolve(req.result ? normalizeHistoryEntry(req.result) : null);
     };
     req.onerror = () => {
       db.close();
@@ -316,6 +457,7 @@ const resolveAudioForTranscription = async () => {
 const storedModel = getStoredModel();
 const storedGuideOpen = getStoredGuideOpen();
 const storedSettings = getStoredSettings();
+const storedUiLanguage = getStoredUiLanguage();
 
 const state = {
   page: 'home',
@@ -333,6 +475,8 @@ const state = {
   audioEntryId: null,
   midiBlob: null,
   midiUrl: null,
+  rawMidiNotes: [],
+  rawMidiDuration: 0,
   midiNotes: [],
   midiDuration: 0,
   midiTempo: null,
@@ -342,6 +486,7 @@ const state = {
   noteHistoryOpen: false,
   scoreReadableMode: false,
   fingerSuggestionMode: false,
+  fingerSuggestionAlgorithm: storedSettings?.fingerSuggestionAlgorithm || DEFAULT_SETTINGS.fingerSuggestionAlgorithm,
   fingerSuggestionLevel: 'beginner',
   rollZoomX: 1,
   rollZoomY: 1,
@@ -350,14 +495,26 @@ const state = {
   statusMessage: '',
   statusType: 'info',
   modelDropdownOpen: false,
+  compareRunning: false,
+  compareProgress: 0,
+  compareResults: null,
+  uiLanguage: storedUiLanguage,
   // History
-  histSearch: '', histStatus: 'all', histModel: 'all', histSort: 'date',
-  histDeleted: new Set(), histSortOpen: false,
+  histSearch: '',
+  histStatus: 'all',
+  histModel: 'all',
+  histSort: 'date',
+  histSortOpen: false,
+  historyEntries: [],
   // Settings
   autoConvert: storedSettings?.autoConvert ?? DEFAULT_SETTINGS.autoConvert,
   velocitySensitivity: storedSettings?.velocitySensitivity ?? DEFAULT_SETTINGS.velocitySensitivity,
   notificationsOn: storedSettings?.notificationsOn ?? DEFAULT_SETTINGS.notificationsOn,
   preferSf2Playback: storedSettings?.preferSf2Playback ?? DEFAULT_SETTINGS.preferSf2Playback,
+  pedalAssist: storedSettings?.pedalAssist ?? DEFAULT_SETTINGS.pedalAssist,
+  pedalAssistAmount: storedSettings?.pedalAssistAmount ?? DEFAULT_SETTINGS.pedalAssistAmount,
+  playbackProfile: storedSettings?.playbackProfile ?? DEFAULT_SETTINGS.playbackProfile,
+  fingerSuggestionReport: null,
 };
 
 // Mutable references (not state, just handles)
@@ -381,6 +538,7 @@ let _editHistoryEntries = [];
 let _appHeader = null;
 let _navigateToPage = null;
 let _dashboardUiCache = null;
+let _lastFingerWarningSignature = '';
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const PROCESS_STEP_BOUNDS = [22, 86, 100];
@@ -399,6 +557,78 @@ const clearStatusMessage = () => {
   state.statusType = 'info';
 };
 
+function _buildPedalCompensatedNotes(notes, amount = state.pedalAssistAmount) {
+  const source = Array.isArray(notes) ? notes : [];
+  if (!source.length) return [];
+  const strength = Math.max(0, Math.min(1, Number(amount) || 0));
+  const tailSec = 0.05 + (0.2 * strength);
+  const maxExtendSec = 0.4 + (0.8 * strength);
+  const minGapSec = 0.012;
+
+  const sorted = source.map(note => ({
+    note: clampMidi(note.note),
+    startTime: Math.max(0, Number(note.startTime) || 0),
+    duration: Math.max(0.03, Number(note.duration) || 0.12),
+    velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+    ...(Number.isInteger(Number(note.fingerOverride)) && Number(note.fingerOverride) >= 1 && Number(note.fingerOverride) <= 5
+      ? { fingerOverride: Math.round(Number(note.fingerOverride)) }
+      : {}),
+  })).sort((a, b) => (a.startTime - b.startTime) || (a.note - b.note));
+
+  const nextOnsetByIndex = new Array(sorted.length).fill(Number.POSITIVE_INFINITY);
+  for (let i = 0; i < sorted.length; i += 1) {
+    const start = sorted[i].startTime;
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      if (sorted[j].startTime > start + 0.0001) {
+        nextOnsetByIndex[i] = sorted[j].startTime;
+        break;
+      }
+    }
+  }
+
+  const nextSamePitchStart = new Array(sorted.length).fill(Number.POSITIVE_INFINITY);
+  const lastPitchIndex = new Map();
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const midi = sorted[i].note;
+    if (lastPitchIndex.has(midi)) {
+      const nextIdx = lastPitchIndex.get(midi);
+      nextSamePitchStart[i] = sorted[nextIdx].startTime;
+    }
+    lastPitchIndex.set(midi, i);
+  }
+
+  return sorted.map((note, index) => {
+    const noteStart = note.startTime;
+    const originalEnd = noteStart + note.duration;
+    let targetEnd = originalEnd;
+    const nextOnset = nextOnsetByIndex[index];
+    if (Number.isFinite(nextOnset)) {
+      const desiredEnd = Math.min(noteStart + maxExtendSec, nextOnset + tailSec);
+      if (desiredEnd > targetEnd) targetEnd = desiredEnd;
+    } else {
+      targetEnd = Math.max(targetEnd, noteStart + Math.min(maxExtendSec, note.duration + tailSec));
+    }
+    const nextSame = nextSamePitchStart[index];
+    if (Number.isFinite(nextSame)) {
+      targetEnd = Math.min(targetEnd, Math.max(noteStart + 0.03, nextSame - minGapSec));
+    }
+
+    return {
+      ...note,
+      duration: Math.max(0.03, targetEnd - noteStart),
+    };
+  });
+}
+
+function _applyPlaybackPerformanceStyle(notes) {
+  const source = Array.isArray(notes) ? notes : [];
+  if (!source.length) return [];
+  const profiled = applyPlaybackProfileToNotes(source, state.playbackProfile);
+  if (!state.pedalAssist) return profiled.map(note => ({ ...note }));
+  const pedalAmount = applyProfileToPedalAmount(state.pedalAssistAmount, state.playbackProfile);
+  return _buildPedalCompensatedNotes(profiled, pedalAmount);
+}
+
 const getSettingsSnapshot = () => ({
   apiUrl: normalizeApiUrl(state.apiUrl),
   selectedModel: normalizeModelId(state.selectedModel) || 'transkun',
@@ -406,6 +636,10 @@ const getSettingsSnapshot = () => ({
   velocitySensitivity: Math.round(clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
   notificationsOn: Boolean(state.notificationsOn),
   preferSf2Playback: Boolean(state.preferSf2Playback),
+  pedalAssist: Boolean(state.pedalAssist),
+  pedalAssistAmount: clampSettingNumber(state.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount),
+  fingerSuggestionAlgorithm: normalizeFingerSuggestionAlgorithm(state.fingerSuggestionAlgorithm),
+  playbackProfile: normalizePlaybackProfile(state.playbackProfile),
 });
 
 function persistAppSettings() {
@@ -416,12 +650,25 @@ function persistAppSettings() {
   state.velocitySensitivity = snapshot.velocitySensitivity;
   state.notificationsOn = snapshot.notificationsOn;
   state.preferSf2Playback = snapshot.preferSf2Playback;
+  state.pedalAssist = snapshot.pedalAssist;
+  state.pedalAssistAmount = snapshot.pedalAssistAmount;
+  state.fingerSuggestionAlgorithm = snapshot.fingerSuggestionAlgorithm;
+  state.playbackProfile = snapshot.playbackProfile;
   persistSelectedModel(snapshot.selectedModel);
   try {
     localStorage.setItem(STORAGE_KEYS.apiUrl, snapshot.apiUrl);
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(snapshot));
   } catch (error) {
     console.warn('Failed to persist app settings:', error);
+  }
+}
+
+function persistUiLanguageSettings() {
+  state.uiLanguage = normalizeUiLanguage(state.uiLanguage);
+  try {
+    localStorage.setItem(STORAGE_KEYS.uiLanguage, state.uiLanguage);
+  } catch (error) {
+    console.warn('Failed to persist UI language settings:', error);
   }
 }
 
@@ -637,18 +884,18 @@ function _syncEditToolbar(content) {
 
   const guideToggle = content.querySelector('#guide-toggle');
   if (guideToggle) {
-    guideToggle.textContent = state.noteGuideOpen ? 'Hide Guide' : 'Show Guide';
+    guideToggle.textContent = state.noteGuideOpen ? _uiText('Hide Guide') : _uiText('Show Guide');
     guideToggle.classList.toggle('active', state.noteGuideOpen);
   }
   const historyToggle = content.querySelector('#history-toggle');
   if (historyToggle) {
     historyToggle.classList.toggle('active', state.noteHistoryOpen);
-    historyToggle.textContent = state.noteHistoryOpen ? 'Hide History' : 'History';
+    historyToggle.textContent = state.noteHistoryOpen ? _uiText('Hide History') : _uiText('History');
   }
   const fingerToggle = content.querySelector('#finger-suggest-toggle');
   if (fingerToggle) {
     fingerToggle.classList.toggle('active', state.fingerSuggestionMode);
-    fingerToggle.textContent = state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels';
+    fingerToggle.textContent = state.fingerSuggestionMode ? _uiText('Finger Labels On') : _uiText('Finger Labels');
   }
   const readableToggle = content.querySelector('#score-readable-toggle');
   if (readableToggle) {
@@ -668,8 +915,19 @@ function _syncEditToolbar(content) {
   content.querySelectorAll('[data-finger-set]').forEach(button => {
     button.disabled = playbackLocked;
   });
+  content.querySelectorAll('[data-finger-algo]').forEach(button => {
+    button.disabled = playbackLocked;
+  });
 
   if (state.noteHistoryOpen) _syncHistoryOverlay(content);
+}
+
+function _syncFingerConfidencePill(content, report = null) {
+  if (!content) return;
+  const pill = content.querySelector('#finger-confidence-pill');
+  if (!pill) return;
+  pill.style.display = 'none';
+  pill.textContent = '';
 }
 
 function resetMidiData() {
@@ -682,6 +940,8 @@ function resetMidiData() {
     state.midiUrl = null;
   }
   state.midiBlob = null;
+  state.rawMidiNotes = [];
+  state.rawMidiDuration = 0;
   state.midiNotes = [];
   state.midiDuration = 0;
   state.midiTempo = null;
@@ -696,6 +956,7 @@ function resetMidiData() {
   state.rollZoomY = 1;
   state.scoreZoomX = 1;
   state.scoreZoomY = 1;
+  state.fingerSuggestionReport = null;
   _resetEditHistory();
 }
 
@@ -813,19 +1074,31 @@ async function ensureSf2SynthReady() {
     await window.JSSynth.waitForReady();
     const synth = new window.JSSynth.Synthesizer();
     synth.init(_nativeAudioCtx.sampleRate);
-    const node = synth.createAudioNode(_nativeAudioCtx, 4096);
+    const node = synth.createAudioNode(_nativeAudioCtx, 1024);
     node.connect(_nativeMasterGain || _nativeAudioCtx.destination);
 
-    const response = await fetch(SF2_SOUND_FONT_URL);
-    if (!response.ok) {
-      throw new Error(`Failed to load ${SF2_SOUND_FONT_URL} (${response.status})`);
+    let sf2Buffer = null;
+    let sf2LoadedFrom = '';
+    for (let i = 0; i < SF2_SOUND_FONT_CANDIDATES.length; i += 1) {
+      const url = SF2_SOUND_FONT_CANDIDATES[i];
+      const response = await fetch(url);
+      if (!response.ok) continue;
+      sf2Buffer = await response.arrayBuffer();
+      sf2LoadedFrom = url;
+      break;
     }
-    const sf2Buffer = await response.arrayBuffer();
+    if (!(sf2Buffer instanceof ArrayBuffer) || sf2Buffer.byteLength === 0) {
+      throw new Error(`Failed to load soundfont (${SF2_SOUND_FONT_CANDIDATES.join(', ')})`);
+    }
     await synth.loadSFont(sf2Buffer);
     synth.midiProgramChange(0, 0);
 
     _sf2Synth = synth;
     _sf2AudioNode = node;
+    _sf2UnavailableReason = '';
+    try {
+      console.info(`SF2 loaded from: ${sf2LoadedFrom}`);
+    } catch (_) {}
     return synth;
   })();
 
@@ -863,11 +1136,18 @@ function stopNativePlayback() {
 
 function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
   const normalizedVelocity = applyVelocitySensitivity(velocityNorm);
+  const playbackProfile = normalizePlaybackProfile(state.playbackProfile);
 
   if (_sf2Synth && state.preferSf2Playback) {
     const midiNote = Math.max(0, Math.min(127, Math.round(Number(noteNumber) || 0)));
     const velocity = Math.max(1, Math.min(127, Math.round(normalizedVelocity * 127)));
-    const noteDurationMs = Math.max(25, Math.round(Math.max(0.03, Number(durationSec) || 0.12) * 1000));
+    const baseDurationMs = Math.max(25, Math.round(Math.max(0.03, Number(durationSec) || 0.12) * 1000));
+    const pedalTailMs = computeSf2TailMs({
+      playbackProfile,
+      pedalAssist: state.pedalAssist,
+      pedalAssistAmount: state.pedalAssistAmount,
+    });
+    const noteDurationMs = baseDurationMs + pedalTailMs;
     _sf2Synth.midiNoteOn(0, midiNote, velocity);
     const noteOffTimer = setTimeout(() => {
       if (!_sf2Synth) return;
@@ -883,8 +1163,11 @@ function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
   const freq = midiToFrequency(noteNumber);
   const velocity = Math.min(1, Math.max(0.08, normalizedVelocity));
 
-  const noteDuration = Math.max(0.05, durationSec);
-  const release = Math.min(2.4, Math.max(0.55, noteDuration * 0.55));
+  const noteDurationBase = Math.max(0.05, durationSec);
+  const profileGate = playbackProfile === 'dry' ? 0.83 : (playbackProfile === 'studio' ? 0.93 : 1.0);
+  const profileRelease = playbackProfile === 'dry' ? 0.36 : (playbackProfile === 'studio' ? 0.46 : 0.55);
+  const noteDuration = Math.max(0.04, noteDurationBase * profileGate);
+  const release = Math.min(2.4, Math.max(0.28, noteDuration * profileRelease));
   const stopAt = now + noteDuration + release + 0.08;
   const brightness = Math.max(0.45, Math.min(1, (noteNumber - 28) / 72));
   const bodyPeak = Math.min(0.34, 0.06 + velocity * 0.22);
@@ -1092,6 +1375,11 @@ function injectCSS(container) {
 .w-nav-btn:hover{color:#9ca3af;}
 .w-nav-btn:hover::before{opacity:1;}
 .w-nav-btn.active{font-weight:600;color:#c4b5fd;background:rgba(139,92,246,0.15);border-color:rgba(139,92,246,0.3);box-shadow:0 0 12px rgba(139,92,246,0.15),0 1px 0 rgba(255,255,255,0.05) inset;}
+.w-header-right{display:flex;align-items:center;gap:10px;min-width:0;}
+.w-lang-switch{display:flex;align-items:center;gap:4px;padding:4px;border-radius:11px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.3);}
+.w-lang-btn{min-width:36px;padding:6px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:#9ca3af;font-size:10px;font-weight:700;letter-spacing:0.08em;cursor:pointer;transition:all 0.2s;}
+.w-lang-btn:hover{color:#d1d5db;background:rgba(255,255,255,0.05);}
+.w-lang-btn.active{background:linear-gradient(135deg,rgba(59,130,246,0.26),rgba(139,92,246,0.26));border-color:rgba(139,92,246,0.36);color:#ede9fe;box-shadow:0 0 12px rgba(139,92,246,0.2);}
 
 /* Ambient Orbs */
 .w-orb{position:fixed;border-radius:50%;pointer-events:none;transform:translate(-50%,-50%);filter:blur(80px);opacity:0.12;width:480px;height:480px;animation:float 20s ease-in-out infinite;}
@@ -1149,6 +1437,7 @@ function injectCSS(container) {
 .w-upload-btn{display:flex;align-items:center;gap:10px;width:100%;border-radius:10px;padding:10px 14px;font-size:11px;font-weight:500;color:#93c5fd;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.25);transition:all 0.25s;box-shadow:0 2px 8px rgba(59,130,246,0.05);}
 .w-upload-btn:hover{background:rgba(59,130,246,0.18);border-color:rgba(59,130,246,0.4);box-shadow:0 4px 12px rgba(59,130,246,0.15);transform:translateY(-1px);}
 .w-upload-btn:active{transform:translateY(0);}
+.w-panel.drag-active{border-color:rgba(59,130,246,0.58);box-shadow:0 0 0 2px rgba(59,130,246,0.26) inset,0 8px 24px rgba(59,130,246,0.2);}
 
 /* File Badge */
 .w-file-badge{display:flex;align-items:center;gap:10px;border-radius:10px;padding:8px 14px;margin-bottom:14px;background:linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.06));border:1px solid rgba(16,185,129,0.25);box-shadow:0 2px 8px rgba(16,185,129,0.08);}
@@ -1397,6 +1686,10 @@ function injectCSS(container) {
   .w-header{padding:10px 12px;}
   .w-logo-name{font-size:18px;}
   .w-header-controls{gap:8px;}
+  .w-header-right{gap:6px;}
+  .w-nav{gap:4px;}
+  .w-nav-btn{padding:6px 10px;font-size:11px;}
+  .w-lang-btn{min-width:30px;padding:5px 7px;}
   .w-header-launch{font-size:16px;padding:11px 18px;border-radius:14px;}
   .w-home{padding:16px 14px 20px;}
   .w-home-hero{grid-template-columns:minmax(0,1fr);}
@@ -1454,6 +1747,12 @@ function normalizeFingerOverride(rawFinger) {
   if (!Number.isFinite(finger)) return 0;
   if (finger < 1 || finger > 5) return 0;
   return finger;
+}
+
+function _clamp01(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
 }
 
 function _groupNotesByOnset(entries, tolerance = 0.045) {
@@ -1781,10 +2080,10 @@ function _optimizeWindow(model, notes, startFinger, level) {
   return { out: best, vel: Number.isFinite(minVel) ? minVel : 0, depth };
 }
 
-function _runHandFingering(entries, hand, level, outMap) {
-  if (!Array.isArray(entries) || !entries.length) return;
+function _runHandFingering(entries, hand, level, outMap, meta = null) {
+  if (!Array.isArray(entries) || !entries.length) return { events: 0, lowConfidenceEvents: 0, fallbackEvents: 0, avgConfidence: 0 };
   const notes = _buildHandInternalNotes(entries, hand, level);
-  if (!notes.length) return;
+  if (!notes.length) return { events: 0, lowConfidenceEvents: 0, fallbackEvents: 0, avgConfidence: 0 };
   const model = _createHandModel(hand, level);
   model.fingerPositions = model.frest.slice();
   model.hasPositionState = false;
@@ -1839,21 +2138,334 @@ function _runHandFingering(entries, hand, level, outMap) {
   notes.forEach(n => {
     const finger = normalizeFingerOverride(n.fingering);
     if (!finger) return;
-    outMap.set(n.index, { finger, hand });
+    outMap.set(n.index, {
+      finger,
+      hand,
+      confidence: _clamp01(meta?.confidence, 0.54),
+      source: String(meta?.source || 'legacy'),
+    });
   });
+  return {
+    events: notes.length,
+    lowConfidenceEvents: 0,
+    fallbackEvents: meta?.source === 'fallback' ? notes.length : 0,
+    avgConfidence: _clamp01(meta?.confidence, 0.54),
+  };
 }
 
-function computeFingerSuggestions(notes, level = 'beginner') {
+function _buildHandEventsForSmartFingering(entries) {
+  const sorted = (Array.isArray(entries) ? entries : [])
+    .slice()
+    .sort((a, b) => (a.start - b.start) || (a.midi - b.midi));
+  if (!sorted.length) return [];
+  const groups = _groupNotesByOnset(sorted, 0.045);
+  return groups.map((group, groupIndex) => ({
+    id: groupIndex,
+    start: Number(group.start) || 0,
+    notes: (group.notes || []).slice().sort((a, b) => a.midi - b.midi).map(note => ({
+      ...note,
+      x: _midiKeyPosCm(note.midi),
+      isBlack: BLACK_S.has(note.midi % 12),
+    })),
+  }));
+}
+
+function _buildFallbackFingerSequence(notes, hand) {
+  const ordered = hand === 'left' ? [5, 4, 3, 2, 1] : [1, 2, 3, 4, 5];
+  const fallback = [];
+  for (let i = 0; i < notes.length; i += 1) {
+    const override = normalizeFingerOverride(notes[i]?.override);
+    fallback.push(override || ordered[Math.min(i, ordered.length - 1)]);
+  }
+  return fallback;
+}
+
+function _enumerateEventFingerings(notes, hand) {
+  const orderedNotes = Array.isArray(notes) ? notes : [];
+  if (!orderedNotes.length) return [];
+  const out = [];
+  const current = new Array(orderedNotes.length).fill(0);
+  const used = new Set();
+  const allFingers = [1, 2, 3, 4, 5];
+
+  const backtrack = (idx, previousFinger) => {
+    if (idx >= orderedNotes.length) {
+      out.push(current.slice());
+      return;
+    }
+    const override = normalizeFingerOverride(orderedNotes[idx].override);
+    const choices = override ? [override] : allFingers;
+    for (let c = 0; c < choices.length; c += 1) {
+      const finger = choices[c];
+      if (used.has(finger)) continue;
+      if (idx > 0) {
+        if (hand === 'right' && finger <= previousFinger) continue;
+        if (hand === 'left' && finger >= previousFinger) continue;
+      }
+      used.add(finger);
+      current[idx] = finger;
+      backtrack(idx + 1, finger);
+      used.delete(finger);
+    }
+  };
+
+  backtrack(0, hand === 'left' ? 6 : 0);
+  if (!out.length) out.push(_buildFallbackFingerSequence(orderedNotes, hand));
+  return out;
+}
+
+function _singleNoteFingerCost(note, finger, hand, level) {
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  let cost = 0;
+  if (note.isBlack && finger === 1) cost += advanced ? 0.55 : 0.95;
+  if (note.isBlack && finger === 5) cost += advanced ? 0.35 : 0.65;
+  if (!note.isBlack && (finger === 2 || finger === 3 || finger === 4)) cost += 0.08;
+  if (hand === 'left' && note.midi >= 72 && finger >= 4) cost += 0.25;
+  if (hand === 'right' && note.midi <= 48 && finger <= 2) cost += 0.25;
+  return cost;
+}
+
+function _eventFingeringCost(notes, fingers, hand, level) {
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  let cost = 0;
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < notes.length; i += 1) {
+    const note = notes[i];
+    const finger = normalizeFingerOverride(fingers[i]);
+    if (!finger) return Number.POSITIVE_INFINITY;
+    if (normalizeFingerOverride(note.override) && note.override !== finger) return Number.POSITIVE_INFINITY;
+    cost += _singleNoteFingerCost(note, finger, hand, level);
+    minX = Math.min(minX, note.x);
+    maxX = Math.max(maxX, note.x);
+    if (i > 0) {
+      const pitchDelta = Math.max(1, notes[i].midi - notes[i - 1].midi);
+      const fingerDelta = Math.abs(fingers[i] - fingers[i - 1]);
+      if (fingerDelta === 0) cost += 4;
+      else if (fingerDelta > pitchDelta + 1) cost += (fingerDelta - pitchDelta) * 0.7;
+    }
+  }
+  if (notes.length > 1) {
+    const spanSemitone = notes[notes.length - 1].midi - notes[0].midi;
+    const spanCm = Math.max(0, maxX - minX);
+    const maxComfortSemitone = advanced ? 15 : 13;
+    const maxComfortCm = advanced ? 12.4 : 11.2;
+    if (spanSemitone > maxComfortSemitone) cost += (spanSemitone - maxComfortSemitone) * 0.8;
+    if (spanCm > maxComfortCm) cost += (spanCm - maxComfortCm) * 1.2;
+  }
+  return cost;
+}
+
+function _buildEventCandidates(event, hand, level) {
+  const notes = Array.isArray(event?.notes) ? event.notes : [];
+  if (!notes.length) return [];
+  const raw = _enumerateEventFingerings(notes, hand);
+  const candidates = raw
+    .map(fingers => ({
+      fingers,
+      cost: _eventFingeringCost(notes, fingers, hand, level),
+    }))
+    .filter(c => Number.isFinite(c.cost))
+    .sort((a, b) => a.cost - b.cost);
+  if (!candidates.length) {
+    return [{
+      fingers: _buildFallbackFingerSequence(notes, hand),
+      cost: 6,
+    }];
+  }
+  return candidates.slice(0, 42);
+}
+
+function _getEventAnchor(event, candidate, hand) {
+  const notes = event.notes || [];
+  if (!notes.length) return { x: 0, midi: 60, finger: hand === 'left' ? 5 : 1 };
+  const idx = hand === 'left' ? 0 : notes.length - 1;
+  return {
+    x: notes[idx].x,
+    midi: notes[idx].midi,
+    finger: normalizeFingerOverride(candidate.fingers[idx]) || (hand === 'left' ? 5 : 1),
+  };
+}
+
+function _transitionFingeringCost(prevEvent, prevCandidate, nextEvent, nextCandidate, hand, level) {
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  const prevAnchor = _getEventAnchor(prevEvent, prevCandidate, hand);
+  const nextAnchor = _getEventAnchor(nextEvent, nextCandidate, hand);
+  const dt = Math.max(0.06, (nextEvent.start - prevEvent.start) || 0);
+  const dx = nextAnchor.x - prevAnchor.x;
+  const adx = Math.abs(dx);
+  const df = nextAnchor.finger - prevAnchor.finger;
+  let cost = 0;
+
+  if (prevAnchor.midi !== nextAnchor.midi && prevAnchor.finger === nextAnchor.finger) {
+    cost += 2.3 + (adx * 0.12);
+  }
+
+  if (hand === 'right') {
+    if (dx > 0 && df < -1) cost += 1.7 + Math.abs(df + 1) * 1.05;
+    if (dx < 0 && df > 1) cost += 1.4 + Math.abs(df - 1) * 0.95;
+  } else {
+    if (dx > 0 && df > 1) cost += 1.7 + Math.abs(df - 1) * 1.05;
+    if (dx < 0 && df < -1) cost += 1.4 + Math.abs(df + 1) * 0.95;
+  }
+
+  const speed = adx / dt;
+  cost += speed * (advanced ? 0.045 : 0.058);
+  if (dt < 0.17 && adx > 5.5) cost += (adx - 5.5) * (advanced ? 0.35 : 0.48);
+  if (Math.abs(df) > 3) cost += (Math.abs(df) - 3) * 0.7;
+
+  if (prevEvent.notes.length > 1 || nextEvent.notes.length > 1) {
+    const prevMid = prevEvent.notes[Math.floor((prevEvent.notes.length - 1) / 2)];
+    const nextMid = nextEvent.notes[Math.floor((nextEvent.notes.length - 1) / 2)];
+    if (prevMid && nextMid) {
+      const middleJump = Math.abs(nextMid.x - prevMid.x);
+      cost += middleJump * (advanced ? 0.018 : 0.024);
+    }
+  }
+  return cost;
+}
+
+function _runHandFingeringSmart(entries, hand, level, outMap) {
+  const events = _buildHandEventsForSmartFingering(entries);
+  if (!events.length) return { events: 0, lowConfidenceEvents: 0, fallbackEvents: 0, avgConfidence: 0 };
+  events.forEach(event => {
+    event.candidates = _buildEventCandidates(event, hand, level);
+  });
+  if (events.some(event => !event.candidates.length)) {
+    return _runHandFingering(entries, hand, level, outMap, {
+      confidence: 0.46,
+      source: 'fallback',
+    });
+  }
+
+  const n = events.length;
+  const dpCosts = Array.from({ length: n }, () => []);
+  const dpPrev = Array.from({ length: n }, () => []);
+
+  for (let i = 0; i < events[0].candidates.length; i += 1) {
+    dpCosts[0][i] = events[0].candidates[i].cost;
+    dpPrev[0][i] = -1;
+  }
+
+  for (let e = 1; e < n; e += 1) {
+    const currEvent = events[e];
+    const prevEvent = events[e - 1];
+    for (let j = 0; j < currEvent.candidates.length; j += 1) {
+      const currCandidate = currEvent.candidates[j];
+      let bestCost = Number.POSITIVE_INFINITY;
+      let bestPrev = -1;
+      for (let k = 0; k < prevEvent.candidates.length; k += 1) {
+        const prevCandidate = prevEvent.candidates[k];
+        const transition = _transitionFingeringCost(prevEvent, prevCandidate, currEvent, currCandidate, hand, level);
+        const total = (dpCosts[e - 1][k] || 0) + transition + currCandidate.cost;
+        if (total < bestCost) {
+          bestCost = total;
+          bestPrev = k;
+        }
+      }
+      dpCosts[e][j] = bestCost;
+      dpPrev[e][j] = bestPrev;
+    }
+  }
+
+  let bestFinal = 0;
+  let bestFinalCost = Number.POSITIVE_INFINITY;
+  const lastIdx = n - 1;
+  for (let i = 0; i < events[lastIdx].candidates.length; i += 1) {
+    const value = dpCosts[lastIdx][i];
+    if (value < bestFinalCost) {
+      bestFinalCost = value;
+      bestFinal = i;
+    }
+  }
+
+  const chosen = new Array(n).fill(0);
+  let ptr = bestFinal;
+  for (let e = n - 1; e >= 0; e -= 1) {
+    chosen[e] = ptr;
+    ptr = dpPrev[e][ptr];
+    if (e > 0 && !Number.isInteger(ptr)) ptr = 0;
+  }
+
+  const fallbackMap = new Map();
+  _runHandFingering(entries, hand, level, fallbackMap, {
+    confidence: 0.48,
+    source: 'fallback',
+  });
+
+  let lowConfidenceEvents = 0;
+  let fallbackEvents = 0;
+  let confidenceSum = 0;
+  let confidenceCount = 0;
+
+  for (let e = 0; e < n; e += 1) {
+    const event = events[e];
+    const chosenIdx = Number.isInteger(chosen[e]) ? chosen[e] : 0;
+    const candidate = event.candidates[chosenIdx] || event.candidates[0];
+    const secondCandidate = event.candidates[Math.min(event.candidates.length - 1, chosenIdx === 0 ? 1 : 0)];
+    const chosenCost = Number(candidate?.cost);
+    const secondCost = Number(secondCandidate?.cost);
+    const margin = Number.isFinite(secondCost) ? Math.max(0, secondCost - chosenCost) : 0;
+    const normalizedMargin = Number.isFinite(chosenCost) ? (margin / Math.max(1, Math.abs(chosenCost))) : 0;
+    const confidence = _clamp01(0.2 + Math.min(0.78, normalizedMargin), 0.45);
+    const shouldFallback = confidence < 0.34;
+
+    if (shouldFallback) {
+      lowConfidenceEvents += 1;
+      fallbackEvents += 1;
+    }
+    confidenceSum += confidence;
+    confidenceCount += 1;
+
+    for (let i = 0; i < event.notes.length; i += 1) {
+      const noteRef = event.notes[i];
+      const fallback = fallbackMap.get(noteRef.index);
+      const candidateFinger = normalizeFingerOverride(candidate.fingers[i]);
+      const finger = shouldFallback
+        ? normalizeFingerOverride(fallback?.finger) || candidateFinger
+        : candidateFinger;
+      if (!finger) continue;
+      outMap.set(noteRef.index, {
+        finger,
+        hand,
+        confidence: shouldFallback ? _clamp01(fallback?.confidence, 0.48) : confidence,
+        source: shouldFallback ? 'fallback' : 'smart',
+      });
+    }
+  }
+  return {
+    events: n,
+    lowConfidenceEvents,
+    fallbackEvents,
+    avgConfidence: confidenceCount ? (confidenceSum / confidenceCount) : 0,
+  };
+}
+
+function computeFingerSuggestions(notes, level = 'beginner', algorithm = 'legacy') {
   const normalizedLevel = normalizeFingerSuggestionLevel(level);
+  const normalizedAlgorithm = normalizeFingerSuggestionAlgorithm(algorithm);
   const map = new Map();
   const sourceNotes = Array.isArray(notes) ? notes : [];
-  if (!sourceNotes.length) return { map, splitMidi: 60 };
+  if (!sourceNotes.length) {
+    return {
+      map,
+      splitMidi: 60,
+      diagnostics: {
+        avgConfidence: 0,
+        lowConfidenceEvents: 0,
+        fallbackEvents: 0,
+        source: normalizedAlgorithm,
+      },
+    };
+  }
 
   const entries = sourceNotes.map((note, index) => {
     const midi = clampMidi(note.note);
     return {
       index,
       midi,
+      start: Math.max(0, Number(note.startTime) || 0),
+      duration: Math.max(0.03, Number(note.duration) || 0.12),
       override: normalizeFingerOverride(note.fingerOverride),
     };
   });
@@ -1862,6 +2474,28 @@ function computeFingerSuggestions(notes, level = 'beginner') {
   const splitMidi = normalizedLevel === 'advanced'
     ? Math.max(52, Math.min(68, medianPitch))
     : 60;
+  const reports = [];
+
+  if (normalizedAlgorithm === 'legacy') {
+    const sorted = entries.slice().sort((a, b) => (a.start - b.start) || (a.midi - b.midi));
+    const groups = _groupNotesByOnset(sorted, 0.04);
+    const leftEntries = [];
+    const rightEntries = [];
+    let leftCenter = splitMidi - 8;
+    let rightCenter = splitMidi + 8;
+    groups.forEach(group => {
+      const notesInGroup = (group.notes || []).slice().sort((a, b) => a.midi - b.midi);
+      const cut = _chooseEventHandSplit(notesInGroup, leftCenter, rightCenter, splitMidi, normalizedLevel);
+      const left = notesInGroup.slice(0, cut);
+      const right = notesInGroup.slice(cut);
+      leftEntries.push(...left);
+      rightEntries.push(...right);
+      if (left.length) leftCenter = _meanMidi(left, leftCenter);
+      if (right.length) rightCenter = _meanMidi(right, rightCenter);
+    });
+    reports.push(_runHandFingeringSmart(leftEntries, 'left', normalizedLevel, map));
+    reports.push(_runHandFingeringSmart(rightEntries, 'right', normalizedLevel, map));
+  }
 
   entries.forEach(entry => {
     if (!entry.override) return;
@@ -1869,15 +2503,42 @@ function computeFingerSuggestions(notes, level = 'beginner') {
     map.set(entry.index, {
       finger: entry.override,
       hand: resolvedHand,
+      confidence: 1,
+      source: 'manual',
     });
   });
 
-  return { map, splitMidi };
+  let events = 0;
+  let lowConfidenceEvents = 0;
+  let fallbackEvents = 0;
+  let weightedConfidence = 0;
+  reports.forEach(report => {
+    const safeReport = report && typeof report === 'object' ? report : {};
+    const eventCount = Math.max(0, Number(safeReport.events) || 0);
+    const avg = _clamp01(safeReport.avgConfidence, 0.5);
+    events += eventCount;
+    lowConfidenceEvents += Math.max(0, Number(safeReport.lowConfidenceEvents) || 0);
+    fallbackEvents += Math.max(0, Number(safeReport.fallbackEvents) || 0);
+    weightedConfidence += avg * eventCount;
+  });
+  const avgConfidence = events > 0 ? (weightedConfidence / events) : 0.5;
+
+  return {
+    map,
+    splitMidi,
+    diagnostics: {
+      avgConfidence,
+      lowConfidenceEvents,
+      fallbackEvents,
+      source: normalizedAlgorithm,
+    },
+  };
 }
 
-function _drawFingerBadge(ctx, x, y, finger, hand, active = false) {
+function _drawFingerBadge(ctx, x, y, finger, hand, active = false, confidence = 1) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   ctx.save();
+  ctx.globalAlpha = 0.5 + (_clamp01(confidence, 0.65) * 0.5);
   const safeFinger = Math.max(1, Math.min(5, Number(finger) || 3));
   const isLeft = hand === 'left';
   const fingerPalette = {
@@ -1929,6 +2590,7 @@ class PianoRoll {
     this.onEditCommit = typeof options.onEditCommit === 'function' ? options.onEditCommit : null;
     this.onUndoRequest = typeof options.onUndoRequest === 'function' ? options.onUndoRequest : null;
     this.onRedoRequest = typeof options.onRedoRequest === 'function' ? options.onRedoRequest : null;
+    this.onFingerSuggestionUpdate = typeof options.onFingerSuggestionUpdate === 'function' ? options.onFingerSuggestionUpdate : null;
     this.currentTime = 0;
     this.isPlaying = false;
     this.pressedKeys = new Set();
@@ -1944,7 +2606,9 @@ class PianoRoll {
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
     this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionAlgorithm = normalizeFingerSuggestionAlgorithm(options.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = new Map();
+    this.fingerSuggestionDiagnostics = null;
     this.fingerSuggestionDirty = true;
     this.fingerSuggestionSignature = '';
     this.nextFingerSuggestionScanAt = 0;
@@ -2242,7 +2906,7 @@ class PianoRoll {
 
   _buildFingerSuggestionSignature() {
     const notes = Array.isArray(this.notes) ? this.notes : [];
-    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}|${this.fingerSuggestionAlgorithm}`;
     let checksum = 0;
     for (let i = 0; i < notes.length; i += 1) {
       const note = notes[i];
@@ -2252,19 +2916,27 @@ class PianoRoll {
       const fingerOverride = normalizeFingerOverride(note.fingerOverride);
       checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
     }
-    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+    return `${notes.length}|${this.fingerSuggestionLevel}|${this.fingerSuggestionAlgorithm}|${checksum.toString(16)}`;
   }
 
   _refreshFingerSuggestionCache(force = false) {
     if (!this.fingerSuggestionMode) {
       this.fingerSuggestionMap.clear();
+      this.fingerSuggestionDiagnostics = null;
+      if (this.onFingerSuggestionUpdate) {
+        this.onFingerSuggestionUpdate(null);
+      }
       this.fingerSuggestionSignature = '';
       this.fingerSuggestionDirty = false;
       return;
     }
     if (!force && !this.fingerSuggestionDirty) return;
-    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel, this.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionDiagnostics = suggestion.diagnostics || null;
+    if (this.onFingerSuggestionUpdate) {
+      this.onFingerSuggestionUpdate(this.fingerSuggestionDiagnostics);
+    }
     this.fingerSuggestionSignature = '';
     this.fingerSuggestionDirty = false;
   }
@@ -2874,7 +3546,8 @@ class PianoRoll {
           bubbleY,
           fingerData.finger,
           fingerData.hand,
-          selected || hovered
+          selected || hovered,
+          fingerData.confidence
         );
       }
     });
@@ -3036,16 +3709,20 @@ class PianoRoll {
       this._setup();
     }
   }
-  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel, algorithm = this.fingerSuggestionAlgorithm) {
     const nextMode = Boolean(enabled);
     const nextLevel = normalizeFingerSuggestionLevel(level);
-    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    const nextAlgorithm = normalizeFingerSuggestionAlgorithm(algorithm);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel || nextAlgorithm !== this.fingerSuggestionAlgorithm;
     if (!changed) return;
     this.fingerSuggestionMode = nextMode;
     this.fingerSuggestionLevel = nextLevel;
+    this.fingerSuggestionAlgorithm = nextAlgorithm;
     this._markFingerSuggestionDirty();
     if (!this.fingerSuggestionMode) {
       this.fingerSuggestionMap.clear();
+      this.fingerSuggestionDiagnostics = null;
+      if (this.onFingerSuggestionUpdate) this.onFingerSuggestionUpdate(null);
       this.fingerSuggestionSignature = '';
       this.fingerSuggestionDirty = false;
     }
@@ -3120,6 +3797,7 @@ class ScoreEditor {
     this.readableMode = Boolean(options.readableMode);
     this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
     this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionAlgorithm = normalizeFingerSuggestionAlgorithm(options.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = new Map();
     this.fingerSuggestionDirty = true;
     this.fingerSuggestionSignature = '';
@@ -3426,7 +4104,7 @@ class ScoreEditor {
 
   _buildFingerSuggestionSignature() {
     const notes = Array.isArray(this.notes) ? this.notes : [];
-    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}|${this.fingerSuggestionAlgorithm}`;
     let checksum = 0;
     for (let i = 0; i < notes.length; i += 1) {
       const note = notes[i];
@@ -3436,19 +4114,27 @@ class ScoreEditor {
       const fingerOverride = normalizeFingerOverride(note.fingerOverride);
       checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
     }
-    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+    return `${notes.length}|${this.fingerSuggestionLevel}|${this.fingerSuggestionAlgorithm}|${checksum.toString(16)}`;
   }
 
   _refreshFingerSuggestionCache(force = false) {
     if (!this.fingerSuggestionMode) {
       this.fingerSuggestionMap.clear();
+      this.fingerSuggestionDiagnostics = null;
+      if (this.onFingerSuggestionUpdate) {
+        this.onFingerSuggestionUpdate(null);
+      }
       this.fingerSuggestionSignature = '';
       this.fingerSuggestionDirty = false;
       return;
     }
     if (!force && !this.fingerSuggestionDirty) return;
-    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel, this.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionDiagnostics = suggestion.diagnostics || null;
+    if (this.onFingerSuggestionUpdate) {
+      this.onFingerSuggestionUpdate(this.fingerSuggestionDiagnostics);
+    }
     this.fingerSuggestionSignature = '';
     this.fingerSuggestionDirty = false;
   }
@@ -3801,8 +4487,8 @@ class ScoreEditor {
     ctx.fillText('𝄢', fixedAnchorX - 52, bassY + (layout.lineGap * 1.25));
     if (!readable) {
       ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillText('Treble Clef', scrollLeft + 10, trebleY - (layout.lineGap * 1.8));
-      ctx.fillText('Bass Clef', scrollLeft + 10, bassY - (layout.lineGap * 1.35));
+      ctx.fillText(_uiText('Treble Clef'), scrollLeft + 10, trebleY - (layout.lineGap * 1.8));
+      ctx.fillText(_uiText('Bass Clef'), scrollLeft + 10, bassY - (layout.lineGap * 1.35));
     }
 
     const playheadX = this._timeToX(this.currentTime, layout);
@@ -3898,7 +4584,8 @@ class ScoreEditor {
           fingerBadge.y,
           fingerData.finger,
           fingerData.hand,
-          selected || hovered || isLive
+          selected || hovered || isLive,
+          fingerData.confidence
         );
       }
 
@@ -4239,16 +4926,20 @@ class ScoreEditor {
     this.readableMode = Boolean(enabled);
   }
 
-  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel, algorithm = this.fingerSuggestionAlgorithm) {
     const nextMode = Boolean(enabled);
     const nextLevel = normalizeFingerSuggestionLevel(level);
-    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    const nextAlgorithm = normalizeFingerSuggestionAlgorithm(algorithm);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel || nextAlgorithm !== this.fingerSuggestionAlgorithm;
     if (!changed) return;
     this.fingerSuggestionMode = nextMode;
     this.fingerSuggestionLevel = nextLevel;
+    this.fingerSuggestionAlgorithm = nextAlgorithm;
     this._markFingerSuggestionDirty();
     if (!this.fingerSuggestionMode) {
       this.fingerSuggestionMap.clear();
+      this.fingerSuggestionDiagnostics = null;
+      if (this.onFingerSuggestionUpdate) this.onFingerSuggestionUpdate(null);
       this.fingerSuggestionSignature = '';
       this.fingerSuggestionDirty = false;
     }
@@ -4443,6 +5134,7 @@ function destroyInstances() {
 }
 
 function _renderEditGuideOverlay(isScoreView) {
+  const tx = (text) => _uiText(text);
   const commonTopics = [
     {
       title: 'Playback Controls',
@@ -4483,8 +5175,9 @@ function _renderEditGuideOverlay(isScoreView) {
     {
       title: 'Finger Labels',
       details: [
-        '<strong>Finger Labels button:</strong> enables manual finger numbers on editable notes.',
-        '<strong>No automatic suggestion:</strong> fingers appear only when you assign them.',
+        '<strong>Finger Labels button:</strong> toggles finger suggestions on editable notes.',
+        '<strong>Smart Auto mode:</strong> assigns automatic finger suggestions per hand.',
+        '<strong>Manual mode:</strong> fingers appear only when you assign them.',
         '<strong>Click a finger badge:</strong> cycle manual finger override (1 → 5).',
         '<strong>Shift + Click badge:</strong> cycle backward (5 → 1).',
         '<strong>Right click badge:</strong> clear manual override on that note.',
@@ -4589,16 +5282,16 @@ function _renderEditGuideOverlay(isScoreView) {
   return `
     <div class="w-edit-help-overlay">
       <div class="w-edit-help-overlay-head">
-        <span class="w-edit-help-overlay-title">${viewLabel}</span>
-        <span class="w-edit-help-overlay-hint">Hover a title to see full controls</span>
+        <span class="w-edit-help-overlay-title">${tx(viewLabel)}</span>
+        <span class="w-edit-help-overlay-hint">${tx('Hover a title to see full controls')}</span>
       </div>
       <div class="w-edit-help-topics">
         ${topics.map(topic => `
           <div class="w-guide-topic" tabindex="0">
-            <span class="w-guide-topic-title">${topic.title}</span>
+            <span class="w-guide-topic-title">${tx(topic.title)}</span>
             <div class="w-guide-tooltip">
-              <p class="w-guide-tooltip-title">${topic.title}</p>
-              ${topic.details.map(detail => `<p>${detail}</p>`).join('')}
+              <p class="w-guide-tooltip-title">${tx(topic.title)}</p>
+              ${topic.details.map(detail => `<p>${tx(detail)}</p>`).join('')}
             </div>
           </div>
         `).join('')}
@@ -4628,6 +5321,7 @@ function _syncGuideOverlay(content) {
   } else {
     body.insertAdjacentHTML('beforebegin', overlayHtml);
   }
+  applyUiLanguage();
 }
 
 function _renderEditHistoryPanel() {
@@ -4635,20 +5329,20 @@ function _renderEditHistoryPanel() {
   return `
     <div class="w-edit-history-panel">
       <div class="w-edit-history-head">
-        <p>Edit History</p>
-        <span class="w-edit-history-meta">Undo ${_notesUndoStack.length} · Redo ${_notesRedoStack.length} · Click to restore</span>
+        <p>${_uiText('Edit History')}</p>
+        <span class="w-edit-history-meta">${_uiFormat('Undo {undo} · Redo {redo} · Click to restore', { undo: _notesUndoStack.length, redo: _notesRedoStack.length })}</span>
       </div>
       <div class="w-edit-history-list">
         ${items.length ? items.map(item => `
           <button class="w-edit-history-item" type="button" data-history-restore="${item.id}">
             <div class="w-edit-history-item-head">
-              <span class="w-edit-history-type">${item.type}</span>
+              <span class="w-edit-history-type">${_uiText(item.type)}</span>
               <span>${item.stamp}</span>
             </div>
-            <p>${item.action}</p>
-            <span class="w-edit-history-item-sub">${Array.isArray(item.notes) ? item.notes.length : 0} notes</span>
+            <p>${_uiText(item.action)}</p>
+            <span class="w-edit-history-item-sub">${Array.isArray(item.notes) ? item.notes.length : 0} ${_uiText('notes')}</span>
           </button>
-        `).join('') : '<div class="w-edit-history-empty">No edit actions yet.</div>'}
+        `).join('') : `<div class="w-edit-history-empty">${_uiText('No edit actions yet.')}</div>`}
       </div>
     </div>
   `;
@@ -4674,6 +5368,7 @@ function _syncHistoryOverlay(content) {
     body.insertAdjacentHTML('beforebegin', panelHtml);
   }
   _bindHistoryOverlayActions(content);
+  applyUiLanguage();
 }
 
 function renderDashboard(content) {
@@ -4693,13 +5388,17 @@ function renderDashboard(content) {
   const activeZoomY = isScoreView ? state.scoreZoomY : state.rollZoomY;
   const canUndo = _notesUndoStack.length > 0;
   const canRedo = _notesRedoStack.length > 0;
+  const fingerReport = state.fingerSuggestionReport && typeof state.fingerSuggestionReport === 'object'
+    ? state.fingerSuggestionReport
+    : null;
+  const fingerConfidencePct = fingerReport ? Math.round(_clamp01(fingerReport.avgConfidence, 0) * 100) : 0;
 
   content.innerHTML = `
     <div class="w-dashboard${canEditNotes ? ' editing-focus' : ''}">
       <div class="w-top-grid">
 
         <!-- Audio Input -->
-        <div class="w-panel">
+        <div class="w-panel" id="audio-input-panel">
           <div class="w-panel-header">${ICON.mic(13,'#6b7280')} AUDIO INPUT</div>
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
             <button class="w-rec-btn${state.isRecording?' recording':''}" id="rec-btn" style="position:relative;">
@@ -4710,6 +5409,7 @@ function renderDashboard(content) {
               <p id="rec-label" style="font-size:11px;color:${state.isRecording?'#ef4444':'#6b7280'};margin-bottom:4px;">${state.isRecording ? '● Recording...' : 'Record piano audio'}</p>
               <button class="w-upload-btn" id="upload-btn">${ICON.upload(12,'#93c5fd')} <span>Upload audio file</span></button>
               <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a,.webm" style="display:none;">
+              <p style="font-size:10px;color:#4b5563;margin-top:6px;">Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)</p>
             </div>
           </div>
           ${state.fileName ? `
@@ -4753,19 +5453,31 @@ function renderDashboard(content) {
                       <span style="font-size:12px;color:#e5e7eb;font-weight:600;">${m==='transkun'?'TransKun':'Onsets & Frames'}</span>
                       ${m==='transkun'?'<span style="font-size:9px;color:#10b981;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.25);border-radius:4px;padding:1px 6px;font-weight:600;">Recommended</span>':''}
                     </div>
-                    <p style="font-size:10px;color:#6b7280;">${m==='transkun'?'Transformer-based model. High accuracy':'Google Magenta model. Optimal for clean recordings'}</p>
+                    <p style="font-size:10px;color:#6b7280;">${m==='transkun'?'Transformer-based model. Balanced performance':'Google Magenta model. Optimal for clean recordings'}</p>
                   </div>
                 </button>
               `).join('<div style="height:1px;background:rgba(255,255,255,0.05);"></div>')}
             </div>
           </div>
-          <div class="w-stat-box" style="margin-bottom:12px;">
-            <p style="font-size:16px;font-weight:700;color:#10b981;">${aM==='transkun'?'97%':'94%'}</p>
-            <p style="font-size:10px;color:#6b7280;">Accuracy</p>
-          </div>
           <button id="convert-btn" class="w-convert-btn" ${canConvertNow?'':'disabled'} style="background:${canConvertNow?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.04)'};border:${canConvertNow?'none':'1px solid rgba(255,255,255,0.08)'};color:${canConvertNow?'white':'#4b5563'};cursor:${canConvertNow?'pointer':'not-allowed'};opacity:${canConvertNow?1:0.45};box-shadow:${canConvertNow?'0 0 25px rgba(139,92,246,0.45)':'none'};">
             ${ICON.zap(14,canConvertNow?'white':'#4b5563')} ${convertLabel}
           </button>
+          <button id="compare-models-btn" ${canConvertNow && !state.compareRunning ? '' : 'disabled'} style="width:100%;border-radius:12px;padding:10px;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;background:${canConvertNow && !state.compareRunning?'rgba(59,130,246,0.14)':'rgba(255,255,255,0.03)'};border:${canConvertNow && !state.compareRunning?'1px solid rgba(59,130,246,0.35)':'1px solid rgba(255,255,255,0.06)'};cursor:${canConvertNow && !state.compareRunning?'pointer':'not-allowed'};opacity:${canConvertNow && !state.compareRunning?1:0.45};">
+            ${ICON.activity(13, canConvertNow && !state.compareRunning ? '#93c5fd' : '#4b5563')}
+            <span style="font-size:12px;color:${canConvertNow && !state.compareRunning ? '#93c5fd' : '#4b5563'};font-weight:600;">
+              ${state.compareRunning ? _uiText('Comparing models…') : _uiText('Compare Both Models')}
+            </span>
+          </button>
+          ${state.compareRunning ? `
+            <div id="compare-proc-wrap" style="display:block;margin-top:10px;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                <span style="font-size:11px;color:#93c5fd;" id="compare-proc-lbl">${_uiText('Comparing models…')}</span>
+                <span style="font-size:11px;color:#6b7280;" id="compare-proc-pct">${Math.round(Math.max(0, Math.min(100, Number(state.compareProgress) || 0)))}%</span>
+              </div>
+              <div class="w-progress-bar"><div class="w-progress-fill" id="compare-proc-bar" style="width:${Math.max(0, Math.min(100, Number(state.compareProgress) || 0))}%"></div></div>
+            </div>
+          ` : ''}
+          ${_renderModelComparePanel()}
           ${state.statusMessage ? `
             <div class="w-file-badge w-fade-in" style="margin-top:12px;background:${state.statusType==='error'?'linear-gradient(135deg,rgba(239,68,68,0.14),rgba(239,68,68,0.08))':'linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.06))'};border:1px solid ${state.statusType==='error'?'rgba(239,68,68,0.35)':'rgba(16,185,129,0.25)'};">
               ${state.statusType==='error' ? ICON.xCircle(13,'#f87171') : ICON.checkCircle(13,'#10b981')}
@@ -4827,14 +5539,14 @@ function renderDashboard(content) {
         <div class="w-piano-header">
           <div style="display:flex;align-items:center;gap:8px;">
             <div style="width:3px;height:14px;border-radius:2px;background:linear-gradient(180deg,#3b82f6,#8b5cf6);"></div>
-            <span style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:0.06em;">${isScoreView ? 'MUSIC SCORE' : 'PIANO ROLL'}</span>
-            <span style="font-size:9px;color:#6b7280;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:2px 6px;">${isScoreView ? 'GRAND STAFF · EDITABLE' : '88 KEYS · SYNTHESIA VIEW'}</span>
+            <span style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:0.06em;">${isScoreView ? _uiText('MUSIC SCORE') : _uiText('PIANO ROLL')}</span>
+            <span style="font-size:9px;color:#6b7280;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:2px 6px;">${isScoreView ? _uiText('GRAND STAFF · EDITABLE') : _uiText('88 KEYS · SYNTHESIA VIEW')}</span>
           </div>
           <div class="w-piano-meta">
             ${canEditNotes ? `
               <div class="w-note-view-switch">
-                <button class="w-note-view-btn ${!isScoreView ? 'active' : ''}" data-note-view="roll">Roll</button>
-                <button class="w-note-view-btn ${isScoreView ? 'active' : ''}" data-note-view="score">Score</button>
+                <button class="w-note-view-btn ${!isScoreView ? 'active' : ''}" data-note-view="roll">${_uiText('Roll')}</button>
+                <button class="w-note-view-btn ${isScoreView ? 'active' : ''}" data-note-view="score">${_uiText('Score')}</button>
               </div>
             ` : ''}
             <button
@@ -4842,48 +5554,52 @@ function renderDashboard(content) {
               class="w-note-edit-btn ${state.noteEditMode ? 'active' : ''}"
               ${state.stage!=='ready' ? 'disabled' : ''}
             >
-              ${state.noteEditMode ? 'Editing On' : 'Edit Notes'}
+              ${state.noteEditMode ? _uiText('Editing On') : _uiText('Edit Notes')}
             </button>
             <button
               id="finger-suggest-toggle"
               class="w-finger-suggest-btn ${state.fingerSuggestionMode ? 'active' : ''}"
               ${state.stage!=='ready' ? 'disabled' : ''}
             >
-              ${state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels'}
+              ${state.fingerSuggestionMode ? _uiText('Finger Labels On') : _uiText('Finger Labels')}
             </button>
             ${canEditNotes && isScoreView ? `
               <button class="w-score-readable-btn ${state.scoreReadableMode ? 'active' : ''}" id="score-readable-toggle">
-                Readable Score
+                ${_uiText('Readable Score')}
               </button>
             ` : ''}
             ${canEditNotes ? `
               <button class="w-note-guide-btn ${state.noteGuideOpen ? 'active' : ''}" id="guide-toggle">
-                ${state.noteGuideOpen ? 'Hide Guide' : 'Show Guide'}
+                ${state.noteGuideOpen ? _uiText('Hide Guide') : _uiText('Show Guide')}
               </button>
             ` : ''}
             <div id="piano-status">
               ${state.midiPlaying
                 ? `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`
                 : `${state.noteEditMode && state.stage==='ready'
-                  ? `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`
-                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Waiting for MIDI'}</span>`}`}
+                  ? `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">${_uiText('Edit Mode Active')}</span></div>`
+                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? _uiText('Ready · Press play') : _uiText('Waiting for MIDI')}</span>`}`}
             </div>
           </div>
         </div>
         ${state.noteEditMode && state.stage === 'ready' ? `
           <div class="w-edit-tools">
-            <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>Undo</button>
-            <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>Redo</button>
-            <button class="w-edit-tool-btn ${state.noteHistoryOpen ? 'active' : ''}" id="history-toggle">${state.noteHistoryOpen ? 'Hide History' : 'History'}</button>
+            <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>${_uiText('Undo')}</button>
+            <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>${_uiText('Redo')}</button>
+            <button class="w-edit-tool-btn ${state.noteHistoryOpen ? 'active' : ''}" id="history-toggle">${state.noteHistoryOpen ? _uiText('Hide History') : _uiText('History')}</button>
             ${state.fingerSuggestionMode ? `
+              <div class="w-finger-level-switch">
+                <button class="w-finger-level-btn ${state.fingerSuggestionAlgorithm === 'legacy' ? 'active' : ''}" data-finger-algo="legacy">${_uiText('Smart Auto')}</button>
+                <button class="w-finger-level-btn ${state.fingerSuggestionAlgorithm === 'manual' ? 'active' : ''}" data-finger-algo="manual">${_uiText('Manual Only')}</button>
+              </div>
               <div class="w-finger-quick">
-                <span class="w-edit-zoom-label">Finger</span>
+                <span class="w-edit-zoom-label">${_uiText('Finger')}</span>
                 <button class="w-edit-tool-btn" data-finger-set="1">1</button>
                 <button class="w-edit-tool-btn" data-finger-set="2">2</button>
                 <button class="w-edit-tool-btn" data-finger-set="3">3</button>
                 <button class="w-edit-tool-btn" data-finger-set="4">4</button>
                 <button class="w-edit-tool-btn" data-finger-set="5">5</button>
-                <button class="w-edit-tool-btn" data-finger-set="0">Clear</button>
+                <button class="w-edit-tool-btn" data-finger-set="0">${_uiText('Clear')}</button>
               </div>
             ` : ''}
             <div class="w-edit-zoom">
@@ -4905,7 +5621,7 @@ function renderDashboard(content) {
         <div class="w-piano-body" id="piano-body"></div>
         ${isScoreView ? `
           <div class="w-score-disclaimer">
-            <strong>Score disclaimer:</strong> this is not a professional engraving score. It is designed only for interactive note editing.
+            <strong>${_uiText('Score disclaimer:')}</strong> ${_uiText('this is not a professional engraving score. It is designed only for interactive note editing.')}
           </div>
         ` : ''}
       </div>
@@ -4930,9 +5646,14 @@ function renderDashboard(content) {
         const action = meta && typeof meta.action === 'string' ? meta.action : 'Edit notes';
         _applyEditorNotesCommit(content, notes, action);
       },
+      onFingerSuggestionUpdate: (report) => {
+        state.fingerSuggestionReport = report && typeof report === 'object' ? report : null;
+        _syncFingerConfidencePill(content, state.fingerSuggestionReport);
+      },
       readableMode: state.scoreReadableMode,
       fingerSuggestionMode: state.fingerSuggestionMode && state.stage === 'ready',
       fingerSuggestionLevel: state.fingerSuggestionLevel,
+      fingerSuggestionAlgorithm: state.fingerSuggestionAlgorithm,
     };
 
     if (isScoreView) {
@@ -4941,17 +5662,27 @@ function renderDashboard(content) {
       _scoreEditor.setPlaying(state.midiPlaying);
       _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
       _scoreEditor.setReadableMode(state.scoreReadableMode);
-      _scoreEditor.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
+      _scoreEditor.setFingerSuggestions(
+        state.fingerSuggestionMode && state.stage === 'ready',
+        state.fingerSuggestionLevel,
+        state.fingerSuggestionAlgorithm
+      );
       _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
       _pianoRoll.setTime(state.midiTime);
       _pianoRoll.setPlaying(state.midiPlaying);
       _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
-      _pianoRoll.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
+      _pianoRoll.setFingerSuggestions(
+        state.fingerSuggestionMode && state.stage === 'ready',
+        state.fingerSuggestionLevel,
+        state.fingerSuggestionAlgorithm
+      );
       _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
     }
   }
+
+  _syncFingerConfidencePill(content, state.fingerSuggestionReport);
 
   if (state.audioUrl && state.fileName) {
     const apWrap = content.querySelector('#ap-wrap');
@@ -4963,6 +5694,44 @@ function renderDashboard(content) {
   content.querySelector('#upload-btn').addEventListener('click', () => content.querySelector('#file-input').click());
   content.querySelector('#file-input').addEventListener('change', _handleUpload);
   content.querySelector('#clear-audio-btn')?.addEventListener('click', () => _clearLoadedAudio(content));
+  const audioDropPanel = content.querySelector('#audio-input-panel');
+  if (audioDropPanel) {
+    let dragDepth = 0;
+    const enter = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepth += 1;
+      audioDropPanel.classList.add('drag-active');
+    };
+    const over = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!audioDropPanel.classList.contains('drag-active')) {
+        audioDropPanel.classList.add('drag-active');
+      }
+    };
+    const leave = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) {
+        audioDropPanel.classList.remove('drag-active');
+      }
+    };
+    const drop = async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepth = 0;
+      audioDropPanel.classList.remove('drag-active');
+      const droppedFile = e.dataTransfer?.files?.[0];
+      if (!droppedFile) return;
+      await _loadAudioFileFromUserInput(droppedFile, content);
+    };
+    audioDropPanel.addEventListener('dragenter', enter);
+    audioDropPanel.addEventListener('dragover', over);
+    audioDropPanel.addEventListener('dragleave', leave);
+    audioDropPanel.addEventListener('drop', drop);
+  }
 
   const modelBtn = content.querySelector('#model-btn');
   modelBtn.addEventListener('click', () => {
@@ -4979,13 +5748,17 @@ function renderDashboard(content) {
       state.modelDropdownOpen = false;
       if (state.stage === 'ready' && (state.audioFile || state.audioEntryId)) {
         const modelLabel = nextModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
-        setStatusMessage(`Model switched to ${modelLabel}. Press Convert to re-transcribe the same audio.`, 'success');
+        setStatusMessage(
+          _tk('status.model_switched', { model: modelLabel }, `Model switched to ${modelLabel}. Press Convert to re-transcribe the same audio.`),
+          'success'
+        );
       }
       renderDashboard(content);
     });
   });
 
   content.querySelector('#convert-btn').addEventListener('click', _handleConvert.bind(null, content));
+  content.querySelector('#compare-models-btn')?.addEventListener('click', () => _handleCompareModels(content));
   content.querySelector('#midi-play').addEventListener('click', () => _midiPlayPause(content));
   content.querySelector('#midi-stop').addEventListener('click', () => _midiStop(content));
   content.querySelector('#demo-midi-btn').addEventListener('click', () => _loadDemoMidi(content));
@@ -4999,8 +5772,8 @@ function renderDashboard(content) {
       state.noteEditorView = next;
       setStatusMessage(
         next === 'score'
-          ? 'Score view enabled. You can edit notes directly on the staff.'
-          : 'Piano roll view enabled.',
+          ? _tk('status.score_view_enabled', {}, 'Score view enabled. You can edit notes directly on the staff.')
+          : _tk('status.roll_view_enabled', {}, 'Piano roll view enabled.'),
         'success'
       );
       renderDashboard(content);
@@ -5011,8 +5784,8 @@ function renderDashboard(content) {
     state.noteEditMode = !state.noteEditMode;
     setStatusMessage(
       state.noteEditMode
-        ? 'Edit mode enabled. Use the visual guide for roll and score shortcuts.'
-        : 'Edit mode disabled.',
+        ? _tk('status.edit_mode_enabled', {}, 'Edit mode enabled. Use the visual guide for roll and score shortcuts.')
+        : _tk('status.edit_mode_disabled', {}, 'Edit mode disabled.'),
       'success'
     );
     renderDashboard(content);
@@ -5020,10 +5793,13 @@ function renderDashboard(content) {
   content.querySelector('#finger-suggest-toggle')?.addEventListener('click', () => {
     if (state.stage !== 'ready') return;
     state.fingerSuggestionMode = !state.fingerSuggestionMode;
+    if (!state.fingerSuggestionMode) state.fingerSuggestionReport = null;
     setStatusMessage(
       state.fingerSuggestionMode
-        ? 'Finger labels enabled. Assign fingers manually to selected notes.'
-        : 'Finger labels disabled.',
+        ? (state.fingerSuggestionAlgorithm === 'legacy'
+          ? _tk('status.finger_suggestions_enabled_smart', {}, 'Finger suggestions enabled (smart auto algorithm).')
+          : _tk('status.finger_labels_enabled_manual', {}, 'Finger labels enabled in manual mode.'))
+        : _tk('status.finger_labels_disabled', {}, 'Finger labels disabled.'),
       'success'
     );
     renderDashboard(content);
@@ -5035,6 +5811,67 @@ function renderDashboard(content) {
       const editor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
       if (!editor || typeof editor.applyFingerOverrideToSelection !== 'function') return;
       editor.applyFingerOverrideToSelection(finger);
+    });
+  });
+  content.querySelectorAll('[data-finger-algo]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (state.stage !== 'ready') return;
+      const nextAlgorithm = normalizeFingerSuggestionAlgorithm(btn.dataset.fingerAlgo);
+      if (nextAlgorithm === state.fingerSuggestionAlgorithm) return;
+      state.fingerSuggestionAlgorithm = nextAlgorithm;
+      persistAppSettings();
+      setStatusMessage(
+        nextAlgorithm === 'legacy'
+          ? _tk('status.smart_finger_enabled', {}, 'Smart finger suggestion enabled.')
+          : _tk('status.manual_fingering_enabled', {}, 'Manual fingering mode enabled.'),
+        'success'
+      );
+      renderDashboard(content);
+    });
+  });
+  content.querySelectorAll('[data-compare-use]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await _useCompareResult(content, btn.dataset.compareUse);
+    });
+  });
+  content.querySelectorAll('[data-compare-download]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ok = _downloadCompareResult(btn.dataset.compareDownload);
+      if (!ok) renderDashboard(content);
+    });
+  });
+  content.querySelectorAll('[data-compare-retry]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const audioFile = await resolveAudioForTranscription();
+      const modelId = normalizeModelId(btn.dataset.compareRetry);
+      if (!audioFile || !modelId) return;
+      state.compareRunning = true;
+      state.compareProgress = 3;
+      renderDashboard(content);
+      _setCompareProgress(content, 8, _tk('status.comparing_model', { model: _getModelDisplayName(modelId) }, `Comparing: ${_getModelDisplayName(modelId)}…`));
+      let compareTimer = null;
+      const startedAt = Date.now();
+      const estimatedMs = _estimateCompareMs(audioFile, modelId);
+      compareTimer = setInterval(() => {
+        const elapsed = Date.now() - startedAt;
+        const target = easingProgress(elapsed, estimatedMs, 8, 92);
+        _setCompareProgress(content, target, _tk('status.comparing_model', { model: _getModelDisplayName(modelId) }, `Comparing: ${_getModelDisplayName(modelId)}…`));
+      }, 320);
+      const result = await _runSingleModelForCompare(audioFile, modelId);
+      if (compareTimer) clearInterval(compareTimer);
+      if (!state.compareResults) {
+        state.compareResults = { createdAt: new Date().toISOString(), fileName: audioFile.name || 'input.wav', results: {} };
+      }
+      state.compareResults.results[modelId] = result;
+      state.compareProgress = 100;
+      state.compareRunning = false;
+      setStatusMessage(
+        result.status === 'completed'
+          ? _tk('status.compare_model_completed', { model: _getModelDisplayName(modelId) }, `${_getModelDisplayName(modelId)} comparison completed.`)
+          : _tk('status.compare_model_failed', { model: _getModelDisplayName(modelId) }, `${_getModelDisplayName(modelId)} comparison failed.`),
+        result.status === 'completed' ? 'success' : 'error'
+      );
+      renderDashboard(content);
     });
   });
 
@@ -5098,6 +5935,7 @@ function renderDashboard(content) {
     _updateSeek(content);
   });
   _syncEditToolbar(content);
+  applyUiLanguage();
 }
 
 function _updateSeek(content) {
@@ -5144,9 +5982,9 @@ function _updateSeek(content) {
       if (statusKey === 'live') {
         ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
       } else if (statusKey === 'edit') {
-        ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
+        ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">${_uiText('Edit Mode Active')}</span></div>`;
       } else {
-        ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Waiting for MIDI'}</span>`;
+        ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? _uiText('Ready · Press play') : _uiText('Waiting for MIDI')}</span>`;
       }
     }
   }
@@ -5362,22 +6200,45 @@ async function _extractMidiData(midiBlob) {
 
 async function _applyMidiBlob(midiBlob, successMessage) {
   const midiData = await _extractMidiData(midiBlob);
+  const effectiveNotes = _applyPlaybackPerformanceStyle(midiData.notes);
+  const effectiveDuration = effectiveNotes.length
+    ? Math.max(...effectiveNotes.map(note => (Number(note.startTime) || 0) + Math.max(0.03, Number(note.duration) || 0)))
+    : 0;
 
   resetMidiData();
   state.midiBlob = midiBlob;
   state.midiUrl = URL.createObjectURL(midiBlob);
-  state.midiNotes = midiData.notes;
-  state.midiDuration = midiData.duration;
+  state.rawMidiNotes = _cloneNotes(midiData.notes);
+  state.rawMidiDuration = midiData.duration;
+  state.midiNotes = _cloneNotes(effectiveNotes);
+  state.midiDuration = Math.max(midiData.duration, effectiveDuration);
   state.midiTempo = midiData.tempo;
 
   state.stage = 'ready';
   state.progress = 0;
   state.midiTime = 0;
+  if (state.pedalAssist && state.midiNotes.length) {
+    _rebuildMidiBlobFromEditedNotes(false);
+  }
   _resetEditHistory();
   setStatusMessage(successMessage, 'success');
 }
 
-function _rebuildMidiBlobFromEditedNotes() {
+function _reprocessCurrentMidiForPlaybackStyle(content) {
+  if (state.stage !== 'ready') return;
+  const source = state.rawMidiNotes.length ? state.rawMidiNotes : state.midiNotes;
+  const effectiveNotes = _applyPlaybackPerformanceStyle(source);
+  state.midiNotes = _cloneNotes(effectiveNotes);
+  state.midiDuration = state.midiNotes.length
+    ? Math.max(...state.midiNotes.map(note => (Number(note.startTime) || 0) + Math.max(0.03, Number(note.duration) || 0)))
+    : 0;
+  const rebuilt = _rebuildMidiBlobFromEditedNotes(false);
+  if (!rebuilt) return;
+  state.midiTime = Math.min(state.midiTime, getMidiDuration());
+  if (content) _updateSeek(content);
+}
+
+function _rebuildMidiBlobFromEditedNotes(syncRaw = true) {
   if (!window.Midi) return false;
 
   try {
@@ -5410,6 +6271,10 @@ function _rebuildMidiBlobFromEditedNotes() {
     state.midiDuration = state.midiNotes.length
       ? Math.max(...state.midiNotes.map(note => (Number(note.startTime) || 0) + Math.max(0.03, Number(note.duration) || 0)))
       : 0;
+    if (syncRaw) {
+      state.rawMidiNotes = _cloneNotes(state.midiNotes);
+      state.rawMidiDuration = state.midiDuration;
+    }
     return true;
   } catch (error) {
     console.error('MIDI rebuild error:', error);
@@ -5554,6 +6419,9 @@ function _clearLoadedAudio(content) {
   state.audioEntryId = null;
   state.stage = 'idle';
   state.modelDropdownOpen = false;
+  state.compareResults = null;
+  state.compareRunning = false;
+  state.compareProgress = 0;
   clearStatusMessage();
 
   try {
@@ -5617,11 +6485,17 @@ async function _handleRecord() {
           });
           localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
           resetMidiData();
+          state.compareResults = null;
+          state.compareRunning = false;
+          state.compareProgress = 0;
           applyAudioEntryToState(entry);
         } catch (error) {
           if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
           _audioUrlRef = URL.createObjectURL(blob);
           resetMidiData();
+          state.compareResults = null;
+          state.compareRunning = false;
+          state.compareProgress = 0;
           state.audioUrl = _audioUrlRef;
           state.audioFile = recordedFile;
           state.fileName = recordedFile.name;
@@ -5655,8 +6529,8 @@ async function _handleRecord() {
   renderDashboard(content);
 }
 
-async function _handleUpload(e) {
-  const file = e.target.files?.[0]; if (!file) return;
+async function _loadAudioFileFromUserInput(file, content) {
+  if (!file) return;
   if (_mediaRecorder && _mediaRecorder.state !== 'inactive') _mediaRecorder.stop();
   _stopRecordingWaveform();
   state.isRecording = false;
@@ -5665,12 +6539,14 @@ async function _handleUpload(e) {
 
   if (file.size > MAX_AUDIO_BYTES) {
     setStatusMessage('Upload too large. Please choose a smaller file.', 'error');
-    renderDashboard(document.getElementById('w-content'));
-    e.target.value = '';
+    renderDashboard(content || document.getElementById('w-content'));
     return;
   }
 
   resetMidiData();
+  state.compareResults = null;
+  state.compareRunning = false;
+  state.compareProgress = 0;
   let loadMessage = `Saved locally: ${file.name}`;
   let loadType = 'success';
   try {
@@ -5693,24 +6569,276 @@ async function _handleUpload(e) {
     loadMessage = 'Saved in memory only (browser storage failed).';
     loadType = 'error';
   }
-  e.target.value = '';
-
-  const content = document.getElementById('w-content');
+  const targetContent = content || document.getElementById('w-content');
   if (state.autoConvert) {
     setStatusMessage(`${loadMessage} Auto-convert started.`, loadType);
-    renderDashboard(content);
-    await _handleConvert(content);
+    renderDashboard(targetContent);
+    await _handleConvert(targetContent);
   } else {
     setStatusMessage(loadMessage, loadType);
+    renderDashboard(targetContent);
+  }
+}
+
+async function _handleUpload(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const content = document.getElementById('w-content');
+  await _loadAudioFileFromUserInput(file, content);
+  e.target.value = '';
+}
+
+function _getModelDisplayName(modelId) {
+  return normalizeModelId(modelId) === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+}
+
+async function _requestTranscriptionFromApi(audioFile, modelId) {
+  const model = normalizeModelId(modelId) || 'transkun';
+  const formData = new FormData();
+  formData.append('audio', audioFile, audioFile.name || 'input.wav');
+  formData.append('model', model);
+  const startedAt = performance.now();
+  const response = await fetch(`${state.apiUrl}/transcribe`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    let errorMessage = 'Transcription failed.';
+    try {
+      const data = await response.json();
+      errorMessage = data.detail || data.message || errorMessage;
+    } catch {
+      const text = await response.text();
+      if (text) errorMessage = text;
+    }
+    throw new Error(errorMessage);
+  }
+  const midiBlob = await response.blob();
+  const elapsedMs = Math.round(performance.now() - startedAt);
+  return { midiBlob, elapsedMs };
+}
+
+function _formatCompareElapsed(ms) {
+  return formatCompareElapsed(ms);
+}
+
+function _setCompareProgress(content, progress, label = _uiText('Comparing models…')) {
+  const clamped = Math.max(0, Math.min(100, Number(progress) || 0));
+  state.compareProgress = clamped;
+  if (!content) return;
+  const wrap = content.querySelector('#compare-proc-wrap');
+  const bar = content.querySelector('#compare-proc-bar');
+  const pct = content.querySelector('#compare-proc-pct');
+  const lbl = content.querySelector('#compare-proc-lbl');
+  if (!wrap) return;
+  wrap.style.display = 'block';
+  if (bar) bar.style.width = `${clamped}%`;
+  if (pct) pct.textContent = `${Math.round(clamped)}%`;
+  if (lbl) lbl.textContent = label;
+}
+
+function _estimateCompareMs(audioFile, modelId) {
+  return estimateCompareDurationMs(audioFile, modelId);
+}
+
+function _renderModelComparePanel() {
+  const compare = state.compareResults;
+  if (!compare || !compare.results) return '';
+  const models = ['transkun', 'onsets_and_frames'];
+  const cards = models.map(modelId => {
+    const result = compare.results[modelId];
+    if (!result) {
+      return `
+        <div class="w-stat-box" style="padding:10px;border:1px solid rgba(255,255,255,0.08);text-align:left;">
+          <p style="font-size:12px;color:#d1d5db;font-weight:600;">${_getModelDisplayName(modelId)}</p>
+          <p style="font-size:10px;color:#6b7280;margin-top:6px;">${_uiText('No result yet')}</p>
+        </div>`;
+    }
+    if (result.status !== 'completed') {
+      return `
+        <div class="w-stat-box" style="padding:10px;border:1px solid rgba(239,68,68,0.25);text-align:left;">
+          <p style="font-size:12px;color:#fecaca;font-weight:600;">${_getModelDisplayName(modelId)}</p>
+          <p style="font-size:10px;color:#fca5a5;margin-top:6px;">${result.errorMessage || _uiText('Conversion failed')}</p>
+          <p style="font-size:10px;color:#6b7280;margin-top:6px;">${_uiText('Time:')} ${_formatCompareElapsed(result.elapsedMs)}</p>
+          <button class="w-edit-tool-btn" data-compare-retry="${modelId}" style="margin-top:8px;">${_uiText('Retry')} ${_getModelDisplayName(modelId)}</button>
+        </div>`;
+    }
+    return `
+      <div class="w-stat-box" style="padding:10px;border:1px solid rgba(59,130,246,0.22);text-align:left;">
+        <p style="font-size:12px;color:#d1d5db;font-weight:600;">${_getModelDisplayName(modelId)}</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+          <span style="font-size:10px;color:#9ca3af;">${_uiText('Notes:')} ${Number(result.notes || 0).toLocaleString()}</span>
+          <span style="font-size:10px;color:#9ca3af;">${_uiText('Dur:')} ${fmtTime(Number(result.durationSec) || 0)}</span>
+          <span style="font-size:10px;color:#9ca3af;">${_uiText('Tempo:')} ${result.tempo ? `${Math.round(result.tempo)} BPM` : '—'}</span>
+        </div>
+        <p style="font-size:10px;color:#6b7280;margin-top:6px;">${_uiText('Time:')} ${_formatCompareElapsed(result.elapsedMs)} · ${_uiText('MIDI:')} ${formatBytes(result.midiSizeBytes)}</p>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="w-edit-tool-btn" data-compare-use="${modelId}">Use Result</button>
+          <button class="w-edit-tool-btn" data-compare-download="${modelId}">Download</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="w-stat-box" style="margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,0.08);text-align:left;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+        <p style="font-size:11px;color:#c4b5fd;font-weight:700;letter-spacing:0.06em;">${_uiText('MODEL COMPARE')}</p>
+        <span style="font-size:10px;color:#6b7280;">${compare.fileName || _uiText('audio file')}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;">
+        ${cards}
+      </div>
+    </div>
+  `;
+}
+
+async function _runSingleModelForCompare(audioFile, modelId) {
+  try {
+    const { midiBlob, elapsedMs } = await _requestTranscriptionFromApi(audioFile, modelId);
+    const parsed = await _extractMidiData(midiBlob);
+    const notes = Array.isArray(parsed.notes) ? parsed.notes.length : 0;
+    const durationSec = Number(parsed.duration) || 0;
+    const tempo = Number(parsed.tempo) || null;
+    const payload = {
+      modelId,
+      status: 'completed',
+      elapsedMs,
+      notes,
+      durationSec,
+      tempo,
+      midiBlob,
+      midiSizeBytes: midiBlob.size || 0,
+      errorMessage: '',
+    };
+    await recordConversionHistory({
+      fileName: audioFile.name || 'input.wav',
+      modelId,
+      status: 'completed',
+      notes,
+      durationSec,
+      audioSizeBytes: audioFile.size || 0,
+      midiSizeBytes: midiBlob.size || 0,
+      audioEntryId: state.audioEntryId || null,
+      midiBlob,
+      errorMessage: '',
+    });
+    return payload;
+  } catch (error) {
+    const payload = {
+      modelId,
+      status: 'failed',
+      elapsedMs: 0,
+      notes: 0,
+      durationSec: 0,
+      tempo: null,
+      midiBlob: null,
+      midiSizeBytes: 0,
+      errorMessage: String(error?.message || 'Unknown conversion error'),
+    };
+    await recordConversionHistory({
+      fileName: audioFile.name || 'input.wav',
+      modelId,
+      status: 'failed',
+      notes: 0,
+      durationSec: null,
+      audioSizeBytes: audioFile.size || 0,
+      midiSizeBytes: 0,
+      audioEntryId: state.audioEntryId || null,
+      midiBlob: null,
+      errorMessage: payload.errorMessage,
+    });
+    return payload;
+  }
+}
+
+function _downloadCompareResult(modelId) {
+  const record = state.compareResults?.results?.[normalizeModelId(modelId) || ''];
+  if (!record || record.status !== 'completed' || !(record.midiBlob instanceof Blob)) {
+    setStatusMessage('No completed compare result available to download.', 'error');
+    return false;
+  }
+  const fileBase = String(state.compareResults?.fileName || state.fileName || 'transcription').replace(/\.[^/.]+$/, '');
+  const url = URL.createObjectURL(record.midiBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${fileBase}_${normalizeModelId(modelId)}.mid`;
+  a.click();
+  URL.revokeObjectURL(url);
+  return true;
+}
+
+async function _useCompareResult(content, modelId) {
+  const normalizedModel = normalizeModelId(modelId);
+  const record = state.compareResults?.results?.[normalizedModel || ''];
+  if (!record || record.status !== 'completed' || !(record.midiBlob instanceof Blob)) {
+    setStatusMessage('Selected compare result is not available.', 'error');
+    renderDashboard(content);
+    return false;
+  }
+  state.selectedModel = normalizedModel || state.selectedModel;
+  persistAppSettings();
+  await _applyMidiBlob(record.midiBlob, `${_getModelDisplayName(state.selectedModel)} result loaded from comparison.`);
+  renderDashboard(content);
+  return true;
+}
+
+async function _handleCompareModels(content) {
+  if (state.compareRunning) return;
+  const audioFile = await resolveAudioForTranscription();
+  if (!audioFile) {
+    setStatusMessage(_tk('status.select_audio_first', {}, 'Select or record an audio file first.'), 'error');
+    renderDashboard(content);
+    return;
+  }
+  state.compareRunning = true;
+  state.compareProgress = 3;
+  state.compareResults = {
+    createdAt: new Date().toISOString(),
+    fileName: audioFile.name || 'input.wav',
+    results: {},
+  };
+  setStatusMessage(_tk('status.compare_running', {}, 'Running model comparison…'), 'success');
+  renderDashboard(content);
+  _setCompareProgress(content, 4, _tk('status.compare_running', {}, 'Running model comparison…'));
+
+  const models = ['transkun', 'onsets_and_frames'];
+  for (let i = 0; i < models.length; i += 1) {
+    const modelId = models[i];
+    const modelName = _getModelDisplayName(modelId);
+    const startPct = i === 0 ? 8 : 55;
+    const endPct = i === 0 ? 50 : 98;
+    setStatusMessage(_tk('status.comparing_model', { model: _getModelDisplayName(modelId) }, `Comparing: ${_getModelDisplayName(modelId)}…`), 'success');
+    _setCompareProgress(content, startPct, _tk('status.comparing_model', { model: modelName }, `Comparing: ${modelName}…`));
+    const startedAt = Date.now();
+    const estimatedMs = _estimateCompareMs(audioFile, modelId);
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const target = easingProgress(elapsed, estimatedMs, startPct, endPct);
+      _setCompareProgress(content, target, _tk('status.comparing_model', { model: modelName }, `Comparing: ${modelName}…`));
+    }, 320);
+    const result = await _runSingleModelForCompare(audioFile, modelId);
+    clearInterval(timer);
+    state.compareResults.results[modelId] = result;
+    _setCompareProgress(content, endPct, _tk('status.comparing_model', { model: modelName }, `Comparing: ${modelName}…`));
     renderDashboard(content);
   }
+
+  state.compareRunning = false;
+  state.compareProgress = 100;
+  const completedCount = models.filter(modelId => state.compareResults?.results?.[modelId]?.status === 'completed').length;
+  if (completedCount === 0) {
+    setStatusMessage(_tk('status.compare_finished_errors', {}, 'Comparison finished with errors in both models.'), 'error');
+  } else {
+    setStatusMessage(_tk('status.compare_finished_partial', { count: completedCount }, `Comparison finished. ${completedCount}/2 model(s) produced MIDI.`), 'success');
+  }
+  renderDashboard(content);
 }
 
 async function _handleConvert(content) {
   if (state.stage === 'processing') return;
   const audioFile = await resolveAudioForTranscription();
   if (!audioFile) {
-    setStatusMessage('Select or record an audio file first.', 'error');
+    setStatusMessage(_tk('status.select_audio_first', {}, 'Select or record an audio file first.'), 'error');
     renderDashboard(content);
     return;
   }
@@ -5736,31 +6864,10 @@ async function _handleConvert(content) {
   }, 350);
 
   try {
-    const formData = new FormData();
-    formData.append('audio', audioFile, audioFile.name || 'input.wav');
-    formData.append('model', getBackendModel());
-
-    const response = await fetch(`${state.apiUrl}/transcribe`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!response.ok) {
-      let errorMessage = 'Transcription failed.';
-      try {
-        const data = await response.json();
-        errorMessage = data.detail || data.message || errorMessage;
-      } catch {
-        const text = await response.text();
-        if (text) errorMessage = text;
-      }
-      throw new Error(errorMessage);
-    }
+    const { midiBlob } = await _requestTranscriptionFromApi(audioFile, getBackendModel());
 
     state.progress = Math.max(state.progress, 99);
     _updateProcessingUI(content);
-
-    const midiBlob = await response.blob();
 
     if (_progressTimer) {
       clearInterval(_progressTimer);
@@ -5768,9 +6875,35 @@ async function _handleConvert(content) {
     }
 
     await _applyMidiBlob(midiBlob, 'MIDI conversion complete.');
+    await recordConversionHistory({
+      fileName: audioFile.name || 'input.wav',
+      modelId: getBackendModel(),
+      status: 'completed',
+      notes: Array.isArray(state.midiNotes) ? state.midiNotes.length : 0,
+      durationSec: Number.isFinite(state.midiDuration) ? state.midiDuration : null,
+      audioSizeBytes: audioFile.size || 0,
+      midiSizeBytes: midiBlob.size || 0,
+      audioEntryId: state.audioEntryId || null,
+      midiBlob,
+      errorMessage: '',
+    });
     notifyConversionEvent('WidiAI conversion complete', `${audioFile.name || 'Audio file'} was converted to MIDI.`);
     renderDashboard(content);
   } catch (error) {
+    try {
+      await recordConversionHistory({
+        fileName: audioFile.name || state.fileName || 'input.wav',
+        modelId: getBackendModel(),
+        status: 'failed',
+        notes: 0,
+        durationSec: null,
+        audioSizeBytes: audioFile?.size || 0,
+        midiSizeBytes: 0,
+        audioEntryId: state.audioEntryId || null,
+        midiBlob: null,
+        errorMessage: String(error?.message || 'Unknown conversion error'),
+      });
+    } catch (_) {}
     state.stage = 'loaded';
     state.progress = 0;
     setStatusMessage(`Conversion error: ${error.message}`, 'error');
@@ -5788,22 +6921,192 @@ async function _handleConvert(content) {
 // HISTORY
 // ═══════════════════════════════════════════════════════════════════
 
+function historyModelShort(modelId) {
+  return normalizeModelId(modelId) === 'onsets_and_frames' ? 'O&F' : 'TransKun';
+}
+
+function historyTimestamp(createdAt) {
+  const ts = Date.parse(String(createdAt || ''));
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function formatHistoryDate(createdAt) {
+  const ts = historyTimestamp(createdAt);
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}:${mm}`;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let amount = value;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  const digits = amount >= 100 || unitIndex === 0 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function _upsertHistoryEntryInState(entry) {
+  const normalized = normalizeHistoryEntry(entry);
+  const idx = state.historyEntries.findIndex(item => item.id === normalized.id);
+  if (idx >= 0) {
+    state.historyEntries[idx] = normalized;
+  } else {
+    state.historyEntries.unshift(normalized);
+  }
+  state.historyEntries.sort((a, b) => historyTimestamp(b.createdAt) - historyTimestamp(a.createdAt));
+  return normalized;
+}
+
+async function hydrateHistoryEntries(content) {
+  try {
+    const rows = await listHistoryEntriesFromDb();
+    state.historyEntries = rows;
+    if (state.page === 'history' && content) {
+      renderHistory(content);
+    }
+  } catch (error) {
+    console.warn('Failed to load conversion history:', error);
+  }
+}
+
+async function recordConversionHistory(entry) {
+  const normalized = normalizeHistoryEntry({
+    ...entry,
+    id: entry?.id || makeEntityId('hist'),
+    createdAt: entry?.createdAt || new Date().toISOString(),
+  });
+  _upsertHistoryEntryInState(normalized);
+  try {
+    await saveHistoryEntryToDb(normalized);
+  } catch (error) {
+    console.warn('Failed to persist conversion history entry:', error);
+  }
+  return normalized;
+}
+
+async function getHistoryEntry(historyId) {
+  if (!historyId) return null;
+  const local = state.historyEntries.find(entry => entry.id === historyId);
+  if (local && (local.midiBlob instanceof Blob || (local.status === 'failed' && local.audioEntryId))) {
+    return local;
+  }
+  try {
+    const fromDb = await loadHistoryEntryFromDb(historyId);
+    if (!fromDb) return local || null;
+    _upsertHistoryEntryInState(fromDb);
+    return fromDb;
+  } catch (error) {
+    console.warn('Failed to load history entry:', error);
+    return local || null;
+  }
+}
+
+async function deleteHistoryEntry(historyId) {
+  if (!historyId) return;
+  state.historyEntries = state.historyEntries.filter(entry => entry.id !== historyId);
+  try {
+    await deleteHistoryEntryFromDb(historyId);
+  } catch (error) {
+    console.warn('Failed to delete history entry:', error);
+  }
+}
+
+async function downloadHistoryMidi(historyId) {
+  const entry = await getHistoryEntry(historyId);
+  if (!entry || entry.status !== 'completed') {
+    setStatusMessage('Only completed conversions can be downloaded.', 'error');
+    return false;
+  }
+  if (!(entry.midiBlob instanceof Blob)) {
+    setStatusMessage('MIDI file is not available for this history item.', 'error');
+    return false;
+  }
+
+  const baseName = String(entry.fileName || 'transcription').replace(/\.[^/.]+$/, '');
+  const modelId = normalizeModelId(entry.modelId) || 'transkun';
+  const url = URL.createObjectURL(entry.midiBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${baseName}_${modelId}.mid`;
+  a.click();
+  URL.revokeObjectURL(url);
+  return true;
+}
+
+async function retryHistoryConversion(historyId) {
+  const entry = await getHistoryEntry(historyId);
+  if (!entry) {
+    setStatusMessage('History item not found.', 'error');
+    return false;
+  }
+
+  const audioEntryId = entry.audioEntryId ? String(entry.audioEntryId) : '';
+  if (!audioEntryId) {
+    setStatusMessage('Retry unavailable: original audio is not stored in browser history.', 'error');
+    return false;
+  }
+
+  let audioEntry = null;
+  try {
+    audioEntry = await loadAudioEntry(audioEntryId);
+  } catch (error) {
+    setStatusMessage(`Retry unavailable: ${error.message}`, 'error');
+    return false;
+  }
+  if (!audioEntry || !audioEntry.blob) {
+    setStatusMessage('Retry unavailable: original audio was not found in browser storage.', 'error');
+    return false;
+  }
+
+  resetMidiData();
+  applyAudioEntryToState(audioEntry);
+  try {
+    localStorage.setItem(STORAGE_KEYS.lastAudioId, audioEntry.id);
+  } catch (_) {}
+
+  const modelId = normalizeModelId(entry.modelId);
+  if (modelId && modelId !== state.selectedModel) {
+    state.selectedModel = modelId;
+    persistAppSettings();
+  }
+
+  if (typeof _navigateToPage === 'function') {
+    _navigateToPage('dashboard');
+  }
+  const content = document.getElementById('w-content');
+  if (!content) return false;
+  renderDashboard(content);
+  await _handleConvert(content);
+  return true;
+}
+
 function renderHistory(content) {
   destroyInstances();
   const s = state;
-  const rows = HISTORY
-    .filter(e => !s.histDeleted.has(e.id))
-    .filter(e => s.histStatus === 'all' || e.status === s.histStatus)
-    .filter(e => s.histModel === 'all' || e.model === s.histModel)
-    .filter(e => e.fileName.toLowerCase().includes(s.histSearch.toLowerCase()))
-    .sort((a, b) => s.histSort === 'notes' ? b.notes - a.notes : s.histSort === 'duration' ? b.duration.localeCompare(a.duration) : b.date.localeCompare(a.date));
-  const total = HISTORY.filter(e => !s.histDeleted.has(e.id)).length;
+  const allRows = Array.isArray(s.historyEntries) ? s.historyEntries.slice() : [];
+  const rows = filterAndSortHistoryEntries(allRows, s, normalizeModelId);
+  const summary = summarizeHistory(allRows);
+  const total = summary.total;
+  const successful = summary.successful;
+  const totalNotes = summary.totalNotes;
+  const avgDurationSec = summary.avgDurationSec;
 
   const statsHtml = [
-    { label: 'Total Conversions', value: '10', color: '#8b5cf6', icon: ICON.music2(16, '#8b5cf6') },
-    { label: 'Successful', value: '8', color: '#10b981', icon: ICON.checkCircle(16, '#10b981') },
-    { label: 'Total Notes', value: '2,162', color: '#3b82f6', icon: ICON.activity(16, '#3b82f6') },
-    { label: 'Avg Duration', value: '1:58', color: '#f59e0b', icon: ICON.clock(16, '#f59e0b') },
+    { label: 'Total Conversions', value: total.toLocaleString(), color: '#8b5cf6', icon: ICON.music2(16, '#8b5cf6') },
+    { label: 'Successful', value: successful.toLocaleString(), color: '#10b981', icon: ICON.checkCircle(16, '#10b981') },
+    { label: 'Total Notes', value: totalNotes.toLocaleString(), color: '#3b82f6', icon: ICON.activity(16, '#3b82f6') },
+    { label: 'Avg Duration', value: avgDurationSec > 0 ? fmtTime(avgDurationSec) : '—', color: '#f59e0b', icon: ICON.clock(16, '#f59e0b') },
   ].map(c => `<div class="w-stat-card"><div style="width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:${c.color}18;border:1px solid ${c.color}33;flex-shrink:0;">${c.icon}</div><div><p style="font-size:20px;font-weight:700;color:#f0f0f8;line-height:1;">${c.value}</p><p style="font-size:11px;color:#6b7280;margin-top:2px;">${c.label}</p></div></div>`).join('');
 
   const sfb = v => v === s.histStatus ? 'active-p' : '';
@@ -5816,16 +7119,16 @@ function renderHistory(content) {
         <div style="width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:${e.status==='completed'?'rgba(139,92,246,0.12)':'rgba(239,68,68,0.1)'};border:1px solid ${e.status==='completed'?'rgba(139,92,246,0.2)':'rgba(239,68,68,0.2)'};">${ICON.fileAudio(13,e.status==='completed'?'#a78bfa':'#f87171')}</div>
         <span style="font-size:12px;color:#d1d5db;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${e.fileName}">${e.fileName}</span>
       </div>
-      <div style="display:flex;align-items:center;gap:6px;">${ICON.calendar(11,'#4b5563')}<span style="font-size:11px;color:#6b7280;">${e.date.split(' ')[0].replace('2026-','')}</span></div>
-      <div style="display:flex;align-items:center;gap:6px;">${e.model==='TransKun'?ICON.cpu(11,'#818cf8'):ICON.activity(11,'#60a5fa')}<span style="font-size:11px;color:${e.model==='TransKun'?'#818cf8':'#60a5fa'};">${e.model==='TransKun'?'TransKun':'O&F'}</span></div>
-      <div style="display:flex;align-items:center;gap:6px;">${ICON.clock(11,'#4b5563')}<span style="font-size:11px;color:#9ca3af;">${e.duration}</span></div>
+      <div style="display:flex;align-items:center;gap:6px;">${ICON.calendar(11,'#4b5563')}<span style="font-size:11px;color:#6b7280;">${formatHistoryDate(e.createdAt)}</span></div>
+      <div style="display:flex;align-items:center;gap:6px;">${normalizeModelId(e.modelId)==='transkun'?ICON.cpu(11,'#818cf8'):ICON.activity(11,'#60a5fa')}<span style="font-size:11px;color:${normalizeModelId(e.modelId)==='transkun'?'#818cf8':'#60a5fa'};">${historyModelShort(e.modelId)}</span></div>
+      <div style="display:flex;align-items:center;gap:6px;">${ICON.clock(11,'#4b5563')}<span style="font-size:11px;color:#9ca3af;">${Number.isFinite(Number(e.durationSec)) && Number(e.durationSec) >= 0 ? fmtTime(Number(e.durationSec)) : '—'}</span></div>
       <div style="display:flex;align-items:center;gap:6px;">${ICON.music2(11,'#4b5563')}<span style="font-size:11px;color:${e.notes>0?'#9ca3af':'#4b5563'};">${e.notes>0?e.notes.toLocaleString():'—'}</span></div>
-      <span style="font-size:11px;color:#6b7280;">${e.size}</span>
+      <span style="font-size:11px;color:#6b7280;">${formatBytes(e.audioSizeBytes)}</span>
       <div class="w-row-actions">
         <div class="w-status-pill ${e.status==='completed'?'w-status-ok':'w-status-fail'}">${e.status==='completed'?ICON.checkCircle(9,'#10b981'):ICON.xCircle(9,'#ef4444')}<span>${e.status}</span></div>
-        ${e.status==='completed'?`<button class="w-icon-btn w-icon-btn-dl" title="Download">${ICON.download(12,'#60a5fa')}</button>`:''}
-        ${e.status==='failed'?`<button class="w-icon-btn w-icon-btn-retry" title="Retry">${ICON.refresh(12,'#fbbf24')}</button>`:''}
-        <button class="w-icon-btn w-icon-btn-del" data-del="${e.id}" title="Delete">${ICON.trash(12,'#f87171')}</button>
+        ${e.status==='completed'?`<button class="w-icon-btn w-icon-btn-dl" data-history-download="${e.id}" title="Download">${ICON.download(12,'#60a5fa')}</button>`:''}
+        <button class="w-icon-btn w-icon-btn-retry" data-history-retry="${e.id}" title="Retry">${ICON.refresh(12,'#fbbf24')}</button>
+        <button class="w-icon-btn w-icon-btn-del" data-history-delete="${e.id}" title="Delete">${ICON.trash(12,'#f87171')}</button>
       </div>
     </div>`).join('');
 
@@ -5838,7 +7141,11 @@ function renderHistory(content) {
           ${['all','completed','failed'].map(v=>`<button class="w-filter-btn ${sfb(v)}" data-hs="${v}">${v==='all'?'All':v.charAt(0).toUpperCase()+v.slice(1)}</button>`).join('')}
         </div>
         <div class="w-filter-group">
-          ${['all','TransKun','Onsets & Frames'].map(v=>`<button class="w-filter-btn ${mfb(v)}" data-hm="${v}">${v==='all'?'All Models':v}</button>`).join('')}
+          ${[
+            { value: 'all', label: 'All Models' },
+            { value: 'transkun', label: 'TransKun' },
+            { value: 'onsets_and_frames', label: 'Onsets & Frames' },
+          ].map(v=>`<button class="w-filter-btn ${mfb(v.value)}" data-hm="${v.value}">${v.label}</button>`).join('')}
         </div>
         <div class="w-sort-wrap">
           <button class="w-sort-btn" id="sort-btn">${ICON.filter(12,'#6b7280')} Sort: ${s.histSort.charAt(0).toUpperCase()+s.histSort.slice(1)} ${ICON.chevronDown(11,'#6b7280')}</button>
@@ -5866,8 +7173,19 @@ function renderHistory(content) {
   content.querySelectorAll('[data-hm]').forEach(b => b.addEventListener('click', () => { s.histModel = b.dataset.hm; renderHistory(content); }));
   content.querySelector('#sort-btn').addEventListener('click', e => { e.stopPropagation(); const dd = content.querySelector('#sort-dd'); if (dd) dd.style.display = dd.style.display === 'none' ? 'block' : 'none'; });
   content.querySelectorAll('[data-sort]').forEach(b => b.addEventListener('click', () => { s.histSort = b.dataset.sort; renderHistory(content); }));
-  content.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { s.histDeleted.add(parseInt(b.dataset.del)); renderHistory(content); }));
-  document.addEventListener('click', e => { const dd = content.querySelector('#sort-dd'); if (dd && !e.target.closest('#sort-btn')) dd.style.display = 'none'; }, { once: false });
+  content.querySelectorAll('[data-history-delete]').forEach(button => button.addEventListener('click', async () => {
+    await deleteHistoryEntry(button.dataset.historyDelete);
+    renderHistory(content);
+  }));
+  content.querySelectorAll('[data-history-download]').forEach(button => button.addEventListener('click', async () => {
+    const downloaded = await downloadHistoryMidi(button.dataset.historyDownload);
+    if (!downloaded) renderHistory(content);
+  }));
+  content.querySelectorAll('[data-history-retry]').forEach(button => button.addEventListener('click', async () => {
+    const started = await retryHistoryConversion(button.dataset.historyRetry);
+    if (!started) renderHistory(content);
+  }));
+  applyUiLanguage();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5880,7 +7198,15 @@ function renderSettings(content) {
 
   const tgl = (id, val) => `<button class="w-toggle" data-setting-toggle="${id}" style="background:${val ? 'linear-gradient(135deg,#3b82f6,#8b5cf6)' : 'rgba(255,255,255,0.1)'};border:${val ? 'none' : '1px solid rgba(255,255,255,0.15)'};box-shadow:${val ? '0 0 10px rgba(139,92,246,0.4)' : 'none'};"><div class="w-toggle-thumb" style="left:${val ? '20px' : '2px'};"></div></button>`;
   const vp = ((s.velocitySensitivity) / 127) * 100;
+  const pedalPct = Math.round(clampSettingNumber(s.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount) * 100);
   const activeModelLabel = s.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  const fingerAlgoLabel = s.fingerSuggestionAlgorithm === 'manual' ? 'Manual Only' : 'Smart Auto';
+  const playbackProfileId = normalizePlaybackProfile(s.playbackProfile);
+  const playbackProfileLabel = playbackProfileId === 'studio'
+    ? _tk('settings.playback_profile.studio', {}, 'Studio')
+    : playbackProfileId === 'dry'
+      ? _tk('settings.playback_profile.dry', {}, 'Dry')
+      : _tk('settings.playback_profile.natural', {}, 'Natural');
   const apiHint = `${normalizeApiUrl(s.apiUrl)}/transcribe`;
 
   content.innerHTML = `
@@ -5923,13 +7249,45 @@ function renderSettings(content) {
           </div>
           <div class="w-divider"></div>
           <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert After Upload / Recording</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Starts conversion immediately when audio is loaded.</p></div>${tgl('autoConvert', s.autoConvert)}</div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Finger Suggestion Algorithm</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Smart Auto uses a global dynamic-programming pass with playability constraints.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button class="w-quality-tab ${s.fingerSuggestionAlgorithm === 'legacy' ? 'active' : ''}" data-setting-finger-algo="legacy">Smart Auto</button>
+              <button class="w-quality-tab ${s.fingerSuggestionAlgorithm === 'manual' ? 'active' : ''}" data-setting-finger-algo="manual">Manual Only</button>
+            </div>
+          </div>
         </div>
 
         <div class="w-section-card">
           <div class="w-section-title"><div class="w-section-icon">${ICON.music2(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Playback</span></div>
           <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">${_tk('settings.playback_profile', {}, 'Playback Profile')}</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">${_tk('settings.playback_profile.help', {}, 'Choose articulation feel for preview and MIDI playback.')}</p></div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+              <select id="settings-playback-profile" class="w-select" style="min-width:170px;">
+                <option value="natural" ${playbackProfileId === 'natural' ? 'selected' : ''}>${_tk('settings.playback_profile.natural', {}, 'Natural')}</option>
+                <option value="studio" ${playbackProfileId === 'studio' ? 'selected' : ''}>${_tk('settings.playback_profile.studio', {}, 'Studio')}</option>
+                <option value="dry" ${playbackProfileId === 'dry' ? 'selected' : ''}>${_tk('settings.playback_profile.dry', {}, 'Dry')}</option>
+              </select>
+            </div>
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
             <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Use Full Grand Piano.sf2</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">When enabled, playback uses the SF2 soundfont when available.</p></div>
             ${tgl('preferSf2Playback', s.preferSf2Playback)}
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Pedal Assist (anti-staccato)</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Extends note tails to preserve legato feel when the source is not staccato.</p></div>
+            ${tgl('pedalAssist', s.pedalAssist)}
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Pedal Assist Amount</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Higher values keep notes sustained longer.</p></div>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <input type="range" class="w-slider" id="settings-pedal-amount" min="0" max="100" step="1" value="${pedalPct}" style="background:linear-gradient(to right,#8b5cf6 ${pedalPct}%,rgba(255,255,255,0.1) ${pedalPct}%);">
+              <span id="settings-pedal-disp" style="font-size:12px;color:#a78bfa;min-width:40px;text-align:right;">${pedalPct}%</span>
+            </div>
           </div>
           <div class="w-divider"></div>
           <div class="w-setting-row">
@@ -5942,10 +7300,28 @@ function renderSettings(content) {
         </div>
 
         <div class="w-section-card">
+          <div class="w-section-title"><div class="w-section-icon">${ICON.sliders(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Language</span></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Interface Language</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Choose English, Spanish, or Catalan.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+              <select id="settings-ui-language" class="w-select" style="min-width:180px;">
+                <option value="en" ${s.uiLanguage === 'en' ? 'selected' : ''}>English</option>
+                <option value="es" ${s.uiLanguage === 'es' ? 'selected' : ''}>Español</option>
+                <option value="ca" ${s.uiLanguage === 'ca' ? 'selected' : ''}>Català</option>
+              </select>
+            </div>
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Language Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Mode: ${s.uiLanguage.toUpperCase()}</p></div>
+          </div>
+        </div>
+
+        <div class="w-section-card">
           <div class="w-section-title"><div class="w-section-icon">${ICON.bell(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Notifications</span></div>
           <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Browser Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Notify when conversion succeeds or fails.</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13, s.notificationsOn ? '#a78bfa' : '#4b5563')}${tgl('notificationsOn', s.notificationsOn)}</div></div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · SF2: ${s.preferSf2Playback ? 'On' : 'Off'}</p></div></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · Profile: ${playbackProfileLabel} · SF2: ${s.preferSf2Playback ? 'On' : 'Off'} · Pedal: ${s.pedalAssist ? `${pedalPct}%` : 'Off'} · Finger Algo: ${fingerAlgoLabel}</p></div></div>
         </div>
       </div>
     </div>`;
@@ -5996,7 +7372,7 @@ function renderSettings(content) {
 
   content.querySelectorAll('[data-setting-toggle]').forEach(btn => btn.addEventListener('click', () => {
     const key = btn.dataset.settingToggle;
-    if (!['autoConvert', 'notificationsOn', 'preferSf2Playback'].includes(key)) return;
+    if (!['autoConvert', 'notificationsOn', 'preferSf2Playback', 'pedalAssist'].includes(key)) return;
     s[key] = !s[key];
     if (key === 'preferSf2Playback' && !s.preferSf2Playback) {
       disposeSf2Synth();
@@ -6005,6 +7381,17 @@ function renderSettings(content) {
     if (key === 'preferSf2Playback' && s.preferSf2Playback) {
       _sf2UnavailableReason = '';
     }
+    if (key === 'pedalAssist' && s.stage === 'ready') {
+      _reprocessCurrentMidiForPlaybackStyle(document.getElementById('w-content'));
+    }
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelectorAll('[data-setting-finger-algo]').forEach(button => button.addEventListener('click', () => {
+    const next = normalizeFingerSuggestionAlgorithm(button.dataset.settingFingerAlgo);
+    if (next === s.fingerSuggestionAlgorithm) return;
+    s.fingerSuggestionAlgorithm = next;
     persistAppSettings();
     renderSettings(content);
   }));
@@ -6021,6 +7408,34 @@ function renderSettings(content) {
     persistAppSettings();
   });
 
+  content.querySelector('#settings-pedal-amount')?.addEventListener('input', e => {
+    const pct = clampSettingNumber(e.target.value, 0, 100, Math.round(DEFAULT_SETTINGS.pedalAssistAmount * 100));
+    s.pedalAssistAmount = pct / 100;
+    const disp = content.querySelector('#settings-pedal-disp');
+    if (disp) disp.textContent = `${pct}%`;
+    e.target.style.background = `linear-gradient(to right,#8b5cf6 ${pct}%,rgba(255,255,255,0.1) ${pct}%)`;
+  });
+  content.querySelector('#settings-pedal-amount')?.addEventListener('change', () => {
+    if (s.stage === 'ready') _reprocessCurrentMidiForPlaybackStyle(document.getElementById('w-content'));
+    persistAppSettings();
+    renderSettings(content);
+  });
+
+  content.querySelector('#settings-playback-profile')?.addEventListener('change', e => {
+    s.playbackProfile = normalizePlaybackProfile(e.target?.value);
+    if (s.stage === 'ready') _reprocessCurrentMidiForPlaybackStyle(document.getElementById('w-content'));
+    persistAppSettings();
+    renderSettings(content);
+  });
+
+  content.querySelector('#settings-ui-language')?.addEventListener('change', e => {
+    s.uiLanguage = normalizeUiLanguage(e.target?.value);
+    persistUiLanguageSettings();
+    _renderHeader();
+    renderSettings(content);
+    applyUiLanguage();
+  });
+
   content.querySelector('#settings-reset')?.addEventListener('click', () => {
     Object.assign(s, {
       apiUrl: normalizeApiUrl(getDefaultApiUrlValue()),
@@ -6029,11 +7444,21 @@ function renderSettings(content) {
       velocitySensitivity: DEFAULT_SETTINGS.velocitySensitivity,
       notificationsOn: DEFAULT_SETTINGS.notificationsOn,
       preferSf2Playback: DEFAULT_SETTINGS.preferSf2Playback,
+      pedalAssist: DEFAULT_SETTINGS.pedalAssist,
+      pedalAssistAmount: DEFAULT_SETTINGS.pedalAssistAmount,
+      fingerSuggestionAlgorithm: DEFAULT_SETTINGS.fingerSuggestionAlgorithm,
+      playbackProfile: DEFAULT_SETTINGS.playbackProfile,
+      uiLanguage: 'en',
     });
     _sf2UnavailableReason = '';
     persistAppSettings();
+    persistUiLanguageSettings();
+    if (s.stage === 'ready') _reprocessCurrentMidiForPlaybackStyle(document.getElementById('w-content'));
+    _renderHeader();
     renderSettings(content);
+    applyUiLanguage();
   });
+  applyUiLanguage();
 }
 
 function renderHome(content) {
@@ -6075,6 +7500,610 @@ function renderHome(content) {
   });
 }
 
+const UI_STATIC_TRANSLATIONS = {
+  es: {
+    Dashboard: 'Panel',
+    History: 'Historial',
+    Settings: 'Ajustes',
+    Home: 'Inicio',
+    'AUDIO INPUT': 'ENTRADA DE AUDIO',
+    'Record piano audio': 'Grabar audio de piano',
+    'Upload audio file': 'Subir archivo de audio',
+    'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrastra y suelta audio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    Clear: 'Limpiar',
+    'AI MODEL': 'MODELO IA',
+    'Convert to MIDI': 'Convertir a MIDI',
+    'Re-convert to MIDI': 'Volver a convertir a MIDI',
+    'Compare Both Models': 'Comparar ambos modelos',
+    'Transformer-based model': 'Modelo basado en Transformer',
+    'Google Magenta model': 'Modelo Google Magenta',
+    'Transformer-based model. Balanced performance': 'Modelo basado en Transformer. Rendimiento equilibrado',
+    'Google Magenta model. Optimal for clean recordings': 'Modelo Google Magenta. Óptimo para grabaciones limpias',
+    Recommended: 'Recomendado',
+    'MIDI PLAYER': 'REPRODUCTOR MIDI',
+    Demo: 'Demo',
+    Upload: 'Subir',
+    Transcribe: 'Transcribir',
+    'Build MIDI': 'Construir MIDI',
+    Notes: 'Notas',
+    Duration: 'Duración',
+    Tempo: 'Tempo',
+    'No MIDI yet': 'Aún no hay MIDI',
+    'Upload or record audio, then convert.': 'Sube o graba audio y luego convierte.',
+    'Export .mid file': 'Exportar archivo .mid',
+    'PIANO ROLL': 'PIANO ROLL',
+    'MUSIC SCORE': 'PARTITURA',
+    Roll: 'Roll',
+    Score: 'Partitura',
+    'Editing On': 'Edición activada',
+    'Edit Notes': 'Editar notas',
+    'Finger Labels On': 'Dedos activados',
+    'Finger Labels': 'Etiquetas de dedos',
+    'Readable Score': 'Partitura legible',
+    'Hide Guide': 'Ocultar guía',
+    'Show Guide': 'Mostrar guía',
+    'Ready · Press play': 'Listo · Pulsa play',
+    'Waiting for MIDI': 'Esperando MIDI',
+    Undo: 'Deshacer',
+    Redo: 'Rehacer',
+    'Hide History': 'Ocultar historial',
+    Finger: 'Dedo',
+    'Smart Auto': 'Auto inteligente',
+    'Manual Only': 'Solo manual',
+    History: 'Historial',
+    'MODEL COMPARE': 'COMPARACIÓN DE MODELOS',
+    'Comparing models…': 'Comparando modelos…',
+    'Running model comparison…': 'Ejecutando comparación de modelos…',
+    'Conversion failed': 'Conversión fallida',
+    'Time:': 'Tiempo:',
+    'Notes:': 'Notas:',
+    'Dur:': 'Dur:',
+    'Tempo:': 'Tempo:',
+    'MIDI:': 'MIDI:',
+    'audio file': 'archivo de audio',
+    '88 KEYS · SYNTHESIA VIEW': '88 TECLAS · VISTA SYNTHESIA',
+    'GRAND STAFF · EDITABLE': 'DOBLE PENTAGRAMA · EDITABLE',
+    'MIDI conversion complete!': '¡Conversión MIDI completada!',
+    'Use Result': 'Usar resultado',
+    Download: 'Descargar',
+    Retry: 'Reintentar',
+    'No result yet': 'Sin resultado todavía',
+    'No conversions found': 'No se encontraron conversiones',
+    'Try adjusting your filters': 'Prueba ajustando los filtros',
+    'Total Conversions': 'Total conversiones',
+    Successful: 'Exitosas',
+    'Total Notes': 'Total notas',
+    'Avg Duration': 'Duración media',
+    'All Models': 'Todos los modelos',
+    'Search files...': 'Buscar archivos...',
+    'Sort:': 'Ordenar:',
+    'File Name': 'Archivo',
+    Date: 'Fecha',
+    Model: 'Modelo',
+    Size: 'Tamaño',
+    entries: 'entradas',
+    Completed: 'Completadas',
+    Failed: 'Fallidas',
+    Language: 'Idioma',
+    Transcription: 'Transcripción',
+    Playback: 'Reproducción',
+    Notifications: 'Notificaciones',
+    'Reset Defaults': 'Restablecer',
+    'Browser Notifications': 'Notificaciones del navegador',
+    'Current Setup': 'Configuración actual',
+    'Settings': 'Ajustes',
+    'AI-POWERED PIANO TRANSCRIPTION': 'TRANSCRIPCIÓN DE PIANO CON IA',
+    'Convert Piano Audio': 'Convierte audio de piano',
+    'to MIDI Instantly': 'a MIDI al instante',
+    'Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.': 'Sube tus grabaciones de piano o graba en directo. Nuestro motor de transcripción con IA convierte tu interpretación en archivos MIDI precisos en segundos.',
+    'Launch WidiAI': 'Abrir WidiAI',
+    'No registration required • Works locally • Browser-based workflow': 'Sin registro • Funciona en local • Flujo en navegador',
+    'Basic controls that are directly connected to conversion and playback.': 'Controles básicos conectados directamente a la conversión y la reproducción.',
+    'Changes are saved automatically.': 'Los cambios se guardan automáticamente.',
+    'Backend API URL': 'URL de la API backend',
+    'Used for conversion requests.': 'Se usa para solicitudes de conversión.',
+    'Current endpoint:': 'Endpoint actual:',
+    'Default Model': 'Modelo predeterminado',
+    'Active model for new conversions.': 'Modelo activo para nuevas conversiones.',
+    'Auto-convert After Upload / Recording': 'Auto-convertir tras subir / grabar',
+    'Starts conversion immediately when audio is loaded.': 'Inicia la conversión automáticamente al cargar audio.',
+    'Finger Suggestion Algorithm': 'Algoritmo de sugerencia de dedos',
+    'Use Full Grand Piano.sf2': 'Usar Full Grand Piano.sf2',
+    'When enabled, playback uses the SF2 soundfont when available.': 'Cuando está activado, la reproducción usa el soundfont SF2 cuando está disponible.',
+    'Pedal Assist (anti-staccato)': 'Asistencia de pedal (anti-staccato)',
+    'Extends note tails to preserve legato feel when the source is not staccato.': 'Alarga la cola de las notas para mantener un legato natural si la fuente no es staccato.',
+    'Pedal Assist Amount': 'Intensidad de asistencia de pedal',
+    'Higher values keep notes sustained longer.': 'Valores altos mantienen las notas más sostenidas.',
+    'Playback Dynamics': 'Dinámica de reproducción',
+    'Scales note velocity for preview and MIDI playback.': 'Escala la velocidad de notas para preescucha y reproducción MIDI.',
+    'Interface Language': 'Idioma de la interfaz',
+    'Choose English, Spanish, or Catalan.': 'Elige inglés, español o catalán.',
+    'Current Language Setup': 'Configuración de idioma actual',
+    'Mode:': 'Modo:',
+    'Smart Auto uses a global dynamic-programming pass with playability constraints.': 'Auto inteligente usa un ajuste global por programación dinámica con restricciones de tocabilidad.',
+    'Save': 'Guardar',
+    'Test': 'Probar',
+    'Go to home': 'Ir al inicio',
+    'Language switch': 'Selector de idioma',
+    'Testing connection to': 'Probando conexión con',
+    'Connection successful:': 'Conexión correcta:',
+    'Connection failed:': 'Conexión fallida:',
+    On: 'Activado',
+    Off: 'Desactivado',
+    'Playback Profile': 'Perfil de reproducción',
+    'Choose articulation feel for preview and MIDI playback.': 'Elige el carácter de articulación para preescucha y reproducción MIDI.',
+    Natural: 'Natural',
+    Studio: 'Studio',
+    Dry: 'Seco',
+    'Profile:': 'Perfil:',
+    'Edit History': 'Historial de edición',
+    'Undo {undo} · Redo {redo} · Click to restore': 'Deshacer {undo} · Rehacer {redo} · Haz clic para restaurar',
+    notes: 'notas',
+    'No edit actions yet.': 'Aún no hay acciones de edición.',
+    'Edit Mode Active': 'Modo edición activo',
+    'Score Editing Guide': 'Guía de edición de partitura',
+    'Roll Editing Guide': 'Guía de edición de roll',
+    'Treble Clef': 'Clave de sol',
+    'Bass Clef': 'Clave de fa',
+    'Hover a title to see full controls': 'Pasa el cursor sobre un título para ver todos los controles',
+    'Playback Controls': 'Controles de reproducción',
+    'Undo / Redo': 'Deshacer / Rehacer',
+    'Multi-select': 'Selección múltiple',
+    Zoom: 'Zoom',
+    Pitch: 'Altura',
+    Time: 'Tiempo',
+    Add: 'Añadir',
+    Delete: 'Borrar',
+    Duplicate: 'Duplicar',
+    '<strong>Space:</strong> toggles play/pause from the current cursor time (it does not reset).': '<strong>Espacio:</strong> alterna play/pausa desde el cursor actual (no se reinicia).',
+    '<strong>Arrow Left/Right:</strong> seek the transport by 0.5 seconds.': '<strong>Flecha Izq./Der.:</strong> mueve el transporte 0,5 segundos.',
+    '<strong>Shift + Arrow Left/Right:</strong> seek by 2 seconds for faster navigation.': '<strong>Shift + Flecha Izq./Der.:</strong> mueve 2 segundos para navegar más rápido.',
+    '<strong>Edit mode rule:</strong> if notes are selected, arrows edit notes; clear selection to seek transport.': '<strong>Regla del modo edición:</strong> si hay notas seleccionadas, las flechas editan notas; limpia la selección para mover el transporte.',
+    '<strong>Cmd/Ctrl + Z:</strong> undo the most recent committed note edit.': '<strong>Cmd/Ctrl + Z:</strong> deshace la última edición de notas confirmada.',
+    '<strong>Shift + Cmd/Ctrl + Z:</strong> redo the latest undone edit.': '<strong>Shift + Cmd/Ctrl + Z:</strong> rehace la última edición deshecha.',
+    '<strong>Ctrl + Y:</strong> alternative redo shortcut.': '<strong>Ctrl + Y:</strong> atajo alternativo para rehacer.',
+    '<strong>History scope:</strong> add, delete, drag, duplicate and keyboard note moves/resizes.': '<strong>Alcance del historial:</strong> añadir, borrar, arrastrar, duplicar y mover/redimensionar notas con teclado.',
+    '<strong>Cmd/Ctrl + Click:</strong> add or remove notes from selection.': '<strong>Cmd/Ctrl + Clic:</strong> añade o quita notas de la selección.',
+    '<strong>Drag on empty editor space:</strong> lasso/box select multiple notes at once.': '<strong>Arrastrar en espacio vacío:</strong> selección por lazo/cuadro de varias notas.',
+    '<strong>Cmd/Ctrl + A:</strong> select all editable notes in the current view.': '<strong>Cmd/Ctrl + A:</strong> selecciona todas las notas editables de la vista actual.',
+    '<strong>Delete / Backspace:</strong> remove every selected note at once.': '<strong>Delete / Backspace:</strong> elimina todas las notas seleccionadas a la vez.',
+    '<strong>Cmd/Ctrl + D and arrows:</strong> duplicate or move the full selection together.': '<strong>Cmd/Ctrl + D y flechas:</strong> duplica o mueve toda la selección a la vez.',
+    '<strong>X controls:</strong> horizontal zoom out / reset / in.': '<strong>Controles X:</strong> zoom horizontal menos / reset / más.',
+    '<strong>Y controls:</strong> vertical zoom out / reset / in.': '<strong>Controles Y:</strong> zoom vertical menos / reset / más.',
+    '<strong>Saved per view:</strong> roll uses rollZoomX/rollZoomY and score uses scoreZoomX/scoreZoomY.': '<strong>Guardado por vista:</strong> roll usa rollZoomX/rollZoomY y partitura usa scoreZoomX/scoreZoomY.',
+    '<strong>Finger Labels button:</strong> toggles finger suggestions on editable notes.': '<strong>Botón Finger Labels:</strong> activa o desactiva sugerencias de dedos en notas editables.',
+    '<strong>Smart Auto mode:</strong> assigns automatic finger suggestions per hand.': '<strong>Modo Auto inteligente:</strong> asigna sugerencias automáticas por mano.',
+    '<strong>Manual mode:</strong> fingers appear only when you assign them.': '<strong>Modo manual:</strong> los dedos aparecen solo cuando los asignas.',
+    '<strong>Click a finger badge:</strong> cycle manual finger override (1 → 5).': '<strong>Clic en una etiqueta de dedo:</strong> recorre la asignación manual (1 → 5).',
+    '<strong>Shift + Click badge:</strong> cycle backward (5 → 1).': '<strong>Shift + clic en etiqueta:</strong> recorre hacia atrás (5 → 1).',
+    '<strong>Right click badge:</strong> clear manual override on that note.': '<strong>Clic derecho en etiqueta:</strong> limpia la asignación manual de esa nota.',
+    '<strong>Keys 1..5:</strong> assign that finger to selected note(s), <strong>0:</strong> clear override.': '<strong>Teclas 1..5:</strong> asigna ese dedo a las notas seleccionadas, <strong>0:</strong> limpia la asignación.',
+    '<strong>Drag note up/down:</strong> moves pitch by staff position.': '<strong>Arrastrar nota arriba/abajo:</strong> mueve la altura por posición en el pentagrama.',
+    '<strong>Arrow Up/Down:</strong> move selected notes by semitone.': '<strong>Flecha Arriba/Abajo:</strong> mueve notas seleccionadas por semitono.',
+    '<strong>Shift + Arrow Up/Down:</strong> move by octave.': '<strong>Shift + Flecha Arriba/Abajo:</strong> mueve por octava.',
+    '<strong>Drag note left/right:</strong> moves start time without changing duration.': '<strong>Arrastrar nota izquierda/derecha:</strong> mueve el inicio sin cambiar la duración.',
+    '<strong>Arrow Left/Right:</strong> nudge selected notes in time.': '<strong>Flecha Izq./Der.:</strong> desplaza en tiempo las notas seleccionadas.',
+    '<strong>Shift + Arrow Left/Right:</strong> larger time step.': '<strong>Shift + Flecha Izq./Der.:</strong> paso temporal más grande.',
+    '<strong>Drag right tail:</strong> change note length.': '<strong>Arrastrar cola derecha:</strong> cambia la longitud de la nota.',
+    '<strong>[ / ]:</strong> shorten or lengthen selected notes.': '<strong>[ / ]:</strong> acorta o alarga las notas seleccionadas.',
+    '<strong>Shift + [ / ]:</strong> larger duration step.': '<strong>Shift + [ / ]:</strong> paso de duración más grande.',
+    '<strong>Double click empty staff space:</strong> creates a note at that pitch and time.': '<strong>Doble clic en zona vacía del pentagrama:</strong> crea una nota en esa altura y tiempo.',
+    '<strong>Delete / Backspace:</strong> remove selected note(s).': '<strong>Delete / Backspace:</strong> elimina la(s) nota(s) seleccionada(s).',
+    '<strong>Right click:</strong> remove hovered note quickly.': '<strong>Clic derecho:</strong> elimina rápidamente la nota bajo el cursor.',
+    '<strong>Cmd/Ctrl + D:</strong> copy selected note(s) to the next rhythmic slot.': '<strong>Cmd/Ctrl + D:</strong> copia la(s) nota(s) seleccionada(s) al siguiente pulso rítmico.',
+    '<strong>Drag left/right:</strong> changes pitch lane in the roll.': '<strong>Arrastrar izquierda/derecha:</strong> cambia el carril de altura en el roll.',
+    '<strong>Arrow Left/Right:</strong> move selected note pitch by semitone.': '<strong>Flecha Izq./Der.:</strong> mueve la altura de la nota seleccionada por semitono.',
+    '<strong>Shift + Arrow Left/Right:</strong> move by octave.': '<strong>Shift + Flecha Izq./Der.:</strong> mueve por octava.',
+    '<strong>Shift + Drag:</strong> move note in time while keeping pitch fixed.': '<strong>Shift + Arrastrar:</strong> mueve la nota en el tiempo manteniendo la altura.',
+    '<strong>Arrow Up/Down:</strong> nudge selected notes in time.': '<strong>Flecha Arriba/Abajo:</strong> desplaza en tiempo las notas seleccionadas.',
+    '<strong>Shift + Arrow Up/Down:</strong> larger time step.': '<strong>Shift + Flecha Arriba/Abajo:</strong> paso temporal más grande.',
+    '<strong>Drag top edge up/down:</strong> resize note duration.': '<strong>Arrastrar borde superior arriba/abajo:</strong> redimensiona la duración de la nota.',
+    '<strong>Double click empty roll space:</strong> create a new note.': '<strong>Doble clic en zona vacía del roll:</strong> crea una nueva nota.',
+    '<strong>Cmd/Ctrl + D:</strong> duplicate selected note(s) forward in time.': '<strong>Cmd/Ctrl + D:</strong> duplica la(s) nota(s) seleccionada(s) hacia delante en el tiempo.',
+    'Score disclaimer:': 'Aviso de partitura:',
+    'this is not a professional engraving score. It is designed only for interactive note editing.': 'esto no es una partitura de grabado profesional. Está diseñada solo para edición interactiva de notas.',
+    'Score view enabled. You can edit notes directly on the staff.': 'Vista de partitura activada. Puedes editar notas directamente en el pentagrama.',
+    'Piano roll view enabled.': 'Vista de piano roll activada.',
+    'Edit mode enabled. Use the visual guide for roll and score shortcuts.': 'Modo edición activado. Usa la guía visual para atajos de roll y partitura.',
+    'Edit mode disabled.': 'Modo edición desactivado.',
+    'Finger suggestions enabled (smart auto algorithm).': 'Sugerencias de dedos activadas (algoritmo auto inteligente).',
+    'Finger labels enabled in manual mode.': 'Etiquetas de dedos activadas en modo manual.',
+    'Finger labels disabled.': 'Etiquetas de dedos desactivadas.',
+    'Smart finger suggestion enabled.': 'Sugerencia de dedos inteligente activada.',
+    'Manual fingering mode enabled.': 'Modo de digitación manual activado.',
+    'Edit notes': 'Editar notas',
+    'Delete notes': 'Borrar notas',
+    'Duplicate notes': 'Duplicar notas',
+    'Add note': 'Añadir nota',
+    'Set manual fingering': 'Asignar digitación manual',
+    'Clear manual fingering': 'Limpiar digitación manual',
+    'Change note duration': 'Cambiar duración de la nota',
+    'Move note timing': 'Mover tiempo de la nota',
+    'Change note pitch': 'Cambiar altura de la nota',
+    'Move note pitch and timing': 'Mover altura y tiempo de la nota',
+    edit: 'edición',
+    undo: 'deshacer',
+    redo: 'rehacer',
+    restore: 'restaurar',
+  },
+  ca: {
+    Dashboard: 'Tauler',
+    History: 'Historial',
+    Settings: 'Configuració',
+    Home: 'Inici',
+    'AUDIO INPUT': 'ENTRADA D\'ÀUDIO',
+    'Record piano audio': 'Gravar àudio de piano',
+    'Upload audio file': 'Pujar fitxer d\'àudio',
+    'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrossega i deixa anar l\'àudio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    Clear: 'Netejar',
+    'AI MODEL': 'MODEL IA',
+    'Convert to MIDI': 'Convertir a MIDI',
+    'Re-convert to MIDI': 'Tornar a convertir a MIDI',
+    'Compare Both Models': 'Comparar tots dos models',
+    'Transformer-based model': 'Model basat en Transformer',
+    'Google Magenta model': 'Model Google Magenta',
+    'Transformer-based model. Balanced performance': 'Model basat en Transformer. Rendiment equilibrat',
+    'Google Magenta model. Optimal for clean recordings': 'Model Google Magenta. Òptim per a gravacions netes',
+    Recommended: 'Recomanat',
+    'MIDI PLAYER': 'REPRODUCTOR MIDI',
+    Demo: 'Demo',
+    Upload: 'Pujar',
+    Transcribe: 'Transcriure',
+    'Build MIDI': 'Construir MIDI',
+    Notes: 'Notes',
+    Duration: 'Durada',
+    Tempo: 'Tempo',
+    'No MIDI yet': 'Encara no hi ha MIDI',
+    'Upload or record audio, then convert.': 'Puja o grava àudio i després converteix.',
+    'Export .mid file': 'Exportar fitxer .mid',
+    'PIANO ROLL': 'PIANO ROLL',
+    'MUSIC SCORE': 'PARTITURA',
+    Roll: 'Roll',
+    Score: 'Partitura',
+    'Editing On': 'Edició activada',
+    'Edit Notes': 'Editar notes',
+    'Finger Labels On': 'Dits activats',
+    'Finger Labels': 'Etiquetes de dits',
+    'Readable Score': 'Partitura llegible',
+    'Hide Guide': 'Amagar guia',
+    'Show Guide': 'Mostrar guia',
+    'Ready · Press play': 'A punt · Prem play',
+    'Waiting for MIDI': 'Esperant MIDI',
+    Undo: 'Desfer',
+    Redo: 'Refer',
+    'Hide History': 'Amagar historial',
+    Finger: 'Dit',
+    'Smart Auto': 'Auto intel·ligent',
+    'Manual Only': 'Només manual',
+    'MODEL COMPARE': 'COMPARACIÓ DE MODELS',
+    'Comparing models…': 'Comparant models…',
+    'Running model comparison…': 'Executant comparació de models…',
+    'Conversion failed': 'Conversió fallida',
+    'Time:': 'Temps:',
+    'Notes:': 'Notes:',
+    'Dur:': 'Dur:',
+    'Tempo:': 'Tempo:',
+    'MIDI:': 'MIDI:',
+    'audio file': 'fitxer d\'àudio',
+    '88 KEYS · SYNTHESIA VIEW': '88 TECLES · VISTA SYNTHESIA',
+    'GRAND STAFF · EDITABLE': 'DOBLE PENTAGRAMA · EDITABLE',
+    'MIDI conversion complete!': 'Conversió MIDI completada!',
+    'Use Result': 'Fer servir resultat',
+    Download: 'Descarregar',
+    Retry: 'Reintentar',
+    'No result yet': 'Sense resultat encara',
+    'No conversions found': 'No s\'han trobat conversions',
+    'Try adjusting your filters': 'Prova d\'ajustar els filtres',
+    'Total Conversions': 'Total conversions',
+    Successful: 'Correctes',
+    'Total Notes': 'Total notes',
+    'Avg Duration': 'Durada mitjana',
+    'All Models': 'Tots els models',
+    'Search files...': 'Cercar fitxers...',
+    'Sort:': 'Ordenar:',
+    'File Name': 'Fitxer',
+    Date: 'Data',
+    Model: 'Model',
+    Size: 'Mida',
+    entries: 'entrades',
+    Completed: 'Completades',
+    Failed: 'Fallides',
+    Language: 'Idioma',
+    Transcription: 'Transcripció',
+    Playback: 'Reproducció',
+    Notifications: 'Notificacions',
+    'Reset Defaults': 'Restablir',
+    'Browser Notifications': 'Notificacions del navegador',
+    'Current Setup': 'Configuració actual',
+    'Settings': 'Configuració',
+    'AI-POWERED PIANO TRANSCRIPTION': 'TRANSCRIPCIÓ DE PIANO AMB IA',
+    'Convert Piano Audio': 'Converteix àudio de piano',
+    'to MIDI Instantly': 'a MIDI a l\'instant',
+    'Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.': 'Puja les teves gravacions de piano o grava en directe. El nostre motor de transcripció amb IA converteix la teva interpretació en fitxers MIDI precisos en segons.',
+    'Launch WidiAI': 'Obrir WidiAI',
+    'No registration required • Works locally • Browser-based workflow': 'Sense registre • Funciona en local • Flux al navegador',
+    'Basic controls that are directly connected to conversion and playback.': 'Controls bàsics connectats directament a la conversió i la reproducció.',
+    'Changes are saved automatically.': 'Els canvis es desen automàticament.',
+    'Backend API URL': 'URL de l\'API backend',
+    'Used for conversion requests.': 'S\'utilitza per a les peticions de conversió.',
+    'Current endpoint:': 'Endpoint actual:',
+    'Default Model': 'Model predeterminat',
+    'Active model for new conversions.': 'Model actiu per a noves conversions.',
+    'Auto-convert After Upload / Recording': 'Auto-conversió després de pujar / gravar',
+    'Starts conversion immediately when audio is loaded.': 'Inicia la conversió immediatament quan es carrega l\'àudio.',
+    'Finger Suggestion Algorithm': 'Algoritme de suggeriment de dits',
+    'Use Full Grand Piano.sf2': 'Fer servir Full Grand Piano.sf2',
+    'When enabled, playback uses the SF2 soundfont when available.': 'Quan està activat, la reproducció fa servir el soundfont SF2 quan està disponible.',
+    'Pedal Assist (anti-staccato)': 'Assistència de pedal (anti-staccato)',
+    'Extends note tails to preserve legato feel when the source is not staccato.': 'Allarga la cua de les notes per mantenir una sensació legato quan la font no és staccato.',
+    'Pedal Assist Amount': 'Intensitat d\'assistència de pedal',
+    'Higher values keep notes sustained longer.': 'Valors alts mantenen les notes més sostingudes.',
+    'Playback Dynamics': 'Dinàmica de reproducció',
+    'Scales note velocity for preview and MIDI playback.': 'Escala la velocitat de les notes per a la previsualització i reproducció MIDI.',
+    'Interface Language': 'Idioma de la interfície',
+    'Choose English, Spanish, or Catalan.': 'Tria anglès, espanyol o català.',
+    'Current Language Setup': 'Configuració d\'idioma actual',
+    'Mode:': 'Mode:',
+    'Smart Auto uses a global dynamic-programming pass with playability constraints.': 'Auto intel·ligent fa servir una passada global de programació dinàmica amb restriccions de tocabilitat.',
+    'Save': 'Desar',
+    'Test': 'Provar',
+    'Go to home': 'Anar a l\'inici',
+    'Language switch': 'Selector d\'idioma',
+    'Testing connection to': 'Provant connexió amb',
+    'Connection successful:': 'Connexió correcta:',
+    'Connection failed:': 'Connexió fallida:',
+    On: 'Activat',
+    Off: 'Desactivat',
+    'Playback Profile': 'Perfil de reproducció',
+    'Choose articulation feel for preview and MIDI playback.': 'Tria el caràcter d’articulació per a la previsualització i reproducció MIDI.',
+    Natural: 'Natural',
+    Studio: 'Studio',
+    Dry: 'Sec',
+    'Profile:': 'Perfil:',
+    'Edit History': 'Historial d\'edició',
+    'Undo {undo} · Redo {redo} · Click to restore': 'Desfer {undo} · Refer {redo} · Clica per restaurar',
+    notes: 'notes',
+    'No edit actions yet.': 'Encara no hi ha accions d\'edició.',
+    'Edit Mode Active': 'Mode edició actiu',
+    'Score Editing Guide': 'Guia d\'edició de partitura',
+    'Roll Editing Guide': 'Guia d\'edició de roll',
+    'Treble Clef': 'Clau de sol',
+    'Bass Clef': 'Clau de fa',
+    'Hover a title to see full controls': 'Passa el cursor per un títol per veure tots els controls',
+    'Playback Controls': 'Controls de reproducció',
+    'Undo / Redo': 'Desfer / Refer',
+    'Multi-select': 'Selecció múltiple',
+    Zoom: 'Zoom',
+    Pitch: 'Altura',
+    Time: 'Temps',
+    Add: 'Afegir',
+    Delete: 'Esborrar',
+    Duplicate: 'Duplicar',
+    '<strong>Space:</strong> toggles play/pause from the current cursor time (it does not reset).': '<strong>Espai:</strong> alterna play/pausa des del cursor actual (no es reinicia).',
+    '<strong>Arrow Left/Right:</strong> seek the transport by 0.5 seconds.': '<strong>Fletxa Esq./Dreta:</strong> mou el transport 0,5 segons.',
+    '<strong>Shift + Arrow Left/Right:</strong> seek by 2 seconds for faster navigation.': '<strong>Shift + Fletxa Esq./Dreta:</strong> mou 2 segons per navegar més ràpid.',
+    '<strong>Edit mode rule:</strong> if notes are selected, arrows edit notes; clear selection to seek transport.': '<strong>Regla del mode edició:</strong> si hi ha notes seleccionades, les fletxes editen notes; neteja la selecció per moure el transport.',
+    '<strong>Cmd/Ctrl + Z:</strong> undo the most recent committed note edit.': '<strong>Cmd/Ctrl + Z:</strong> desfà l\'última edició de notes confirmada.',
+    '<strong>Shift + Cmd/Ctrl + Z:</strong> redo the latest undone edit.': '<strong>Shift + Cmd/Ctrl + Z:</strong> refà l\'última edició desfeta.',
+    '<strong>Ctrl + Y:</strong> alternative redo shortcut.': '<strong>Ctrl + Y:</strong> drecera alternativa per refer.',
+    '<strong>History scope:</strong> add, delete, drag, duplicate and keyboard note moves/resizes.': '<strong>Abast de l\'historial:</strong> afegir, esborrar, arrossegar, duplicar i moure/redimensionar notes amb teclat.',
+    '<strong>Cmd/Ctrl + Click:</strong> add or remove notes from selection.': '<strong>Cmd/Ctrl + Clic:</strong> afegeix o treu notes de la selecció.',
+    '<strong>Drag on empty editor space:</strong> lasso/box select multiple notes at once.': '<strong>Arrossegar en espai buit:</strong> selecció per llaç/caixa de diverses notes.',
+    '<strong>Cmd/Ctrl + A:</strong> select all editable notes in the current view.': '<strong>Cmd/Ctrl + A:</strong> selecciona totes les notes editables de la vista actual.',
+    '<strong>Delete / Backspace:</strong> remove every selected note at once.': '<strong>Delete / Backspace:</strong> elimina totes les notes seleccionades alhora.',
+    '<strong>Cmd/Ctrl + D and arrows:</strong> duplicate or move the full selection together.': '<strong>Cmd/Ctrl + D i fletxes:</strong> duplica o mou tota la selecció alhora.',
+    '<strong>X controls:</strong> horizontal zoom out / reset / in.': '<strong>Controls X:</strong> zoom horitzontal menys / reset / més.',
+    '<strong>Y controls:</strong> vertical zoom out / reset / in.': '<strong>Controls Y:</strong> zoom vertical menys / reset / més.',
+    '<strong>Saved per view:</strong> roll uses rollZoomX/rollZoomY and score uses scoreZoomX/scoreZoomY.': '<strong>Desat per vista:</strong> roll usa rollZoomX/rollZoomY i partitura usa scoreZoomX/scoreZoomY.',
+    '<strong>Finger Labels button:</strong> toggles finger suggestions on editable notes.': '<strong>Botó Finger Labels:</strong> activa o desactiva suggeriments de dits en notes editables.',
+    '<strong>Smart Auto mode:</strong> assigns automatic finger suggestions per hand.': '<strong>Mode Auto intel·ligent:</strong> assigna suggeriments automàtics per mà.',
+    '<strong>Manual mode:</strong> fingers appear only when you assign them.': '<strong>Mode manual:</strong> els dits apareixen només quan els assignes.',
+    '<strong>Click a finger badge:</strong> cycle manual finger override (1 → 5).': '<strong>Clic a una etiqueta de dit:</strong> recorre l\'assignació manual (1 → 5).',
+    '<strong>Shift + Click badge:</strong> cycle backward (5 → 1).': '<strong>Shift + clic a etiqueta:</strong> recorre enrere (5 → 1).',
+    '<strong>Right click badge:</strong> clear manual override on that note.': '<strong>Clic dret a etiqueta:</strong> neteja l\'assignació manual d\'aquesta nota.',
+    '<strong>Keys 1..5:</strong> assign that finger to selected note(s), <strong>0:</strong> clear override.': '<strong>Tecles 1..5:</strong> assigna aquest dit a les notes seleccionades, <strong>0:</strong> neteja l\'assignació.',
+    '<strong>Drag note up/down:</strong> moves pitch by staff position.': '<strong>Arrossegar nota amunt/avall:</strong> mou l\'altura per posició al pentagrama.',
+    '<strong>Arrow Up/Down:</strong> move selected notes by semitone.': '<strong>Fletxa Amunt/Avall:</strong> mou notes seleccionades per semitò.',
+    '<strong>Shift + Arrow Up/Down:</strong> move by octave.': '<strong>Shift + Fletxa Amunt/Avall:</strong> mou per octava.',
+    '<strong>Drag note left/right:</strong> moves start time without changing duration.': '<strong>Arrossegar nota esquerra/dreta:</strong> mou l\'inici sense canviar la durada.',
+    '<strong>Arrow Left/Right:</strong> nudge selected notes in time.': '<strong>Fletxa Esq./Dreta:</strong> desplaça en temps les notes seleccionades.',
+    '<strong>Shift + Arrow Left/Right:</strong> larger time step.': '<strong>Shift + Fletxa Esq./Dreta:</strong> pas temporal més gran.',
+    '<strong>Drag right tail:</strong> change note length.': '<strong>Arrossegar cua dreta:</strong> canvia la longitud de la nota.',
+    '<strong>[ / ]:</strong> shorten or lengthen selected notes.': '<strong>[ / ]:</strong> escurça o allarga les notes seleccionades.',
+    '<strong>Shift + [ / ]:</strong> larger duration step.': '<strong>Shift + [ / ]:</strong> pas de durada més gran.',
+    '<strong>Double click empty staff space:</strong> creates a note at that pitch and time.': '<strong>Doble clic en zona buida del pentagrama:</strong> crea una nota en aquella altura i temps.',
+    '<strong>Delete / Backspace:</strong> remove selected note(s).': '<strong>Delete / Backspace:</strong> elimina la/les nota(es) seleccionada(es).',
+    '<strong>Right click:</strong> remove hovered note quickly.': '<strong>Clic dret:</strong> elimina ràpidament la nota sota el cursor.',
+    '<strong>Cmd/Ctrl + D:</strong> copy selected note(s) to the next rhythmic slot.': '<strong>Cmd/Ctrl + D:</strong> copia la/les nota(es) seleccionada(es) al següent pols rítmic.',
+    '<strong>Drag left/right:</strong> changes pitch lane in the roll.': '<strong>Arrossegar esquerra/dreta:</strong> canvia el carril d\'altura al roll.',
+    '<strong>Arrow Left/Right:</strong> move selected note pitch by semitone.': '<strong>Fletxa Esq./Dreta:</strong> mou l\'altura de la nota seleccionada per semitò.',
+    '<strong>Shift + Arrow Left/Right:</strong> move by octave.': '<strong>Shift + Fletxa Esq./Dreta:</strong> mou per octava.',
+    '<strong>Shift + Drag:</strong> move note in time while keeping pitch fixed.': '<strong>Shift + Arrossegar:</strong> mou la nota en el temps mantenint l\'altura.',
+    '<strong>Arrow Up/Down:</strong> nudge selected notes in time.': '<strong>Fletxa Amunt/Avall:</strong> desplaça en temps les notes seleccionades.',
+    '<strong>Shift + Arrow Up/Down:</strong> larger time step.': '<strong>Shift + Fletxa Amunt/Avall:</strong> pas temporal més gran.',
+    '<strong>Drag top edge up/down:</strong> resize note duration.': '<strong>Arrossegar vora superior amunt/avall:</strong> redimensiona la durada de la nota.',
+    '<strong>Double click empty roll space:</strong> create a new note.': '<strong>Doble clic en zona buida del roll:</strong> crea una nota nova.',
+    '<strong>Cmd/Ctrl + D:</strong> duplicate selected note(s) forward in time.': '<strong>Cmd/Ctrl + D:</strong> duplica la/les nota(es) seleccionada(es) cap endavant en el temps.',
+    'Score disclaimer:': 'Avís de partitura:',
+    'this is not a professional engraving score. It is designed only for interactive note editing.': 'això no és una partitura de gravat professional. Està dissenyada només per a l\'edició interactiva de notes.',
+    'Score view enabled. You can edit notes directly on the staff.': 'Vista de partitura activada. Pots editar notes directament al pentagrama.',
+    'Piano roll view enabled.': 'Vista de piano roll activada.',
+    'Edit mode enabled. Use the visual guide for roll and score shortcuts.': 'Mode edició activat. Fes servir la guia visual per a dreceres de roll i partitura.',
+    'Edit mode disabled.': 'Mode edició desactivat.',
+    'Finger suggestions enabled (smart auto algorithm).': 'Suggeriments de dits activats (algoritme auto intel·ligent).',
+    'Finger labels enabled in manual mode.': 'Etiquetes de dits activades en mode manual.',
+    'Finger labels disabled.': 'Etiquetes de dits desactivades.',
+    'Smart finger suggestion enabled.': 'Suggeriment de dits intel·ligent activat.',
+    'Manual fingering mode enabled.': 'Mode de digitació manual activat.',
+    'Edit notes': 'Editar notes',
+    'Delete notes': 'Esborrar notes',
+    'Duplicate notes': 'Duplicar notes',
+    'Add note': 'Afegir nota',
+    'Set manual fingering': 'Assignar digitació manual',
+    'Clear manual fingering': 'Netejar digitació manual',
+    'Change note duration': 'Canviar durada de la nota',
+    'Move note timing': 'Moure temps de la nota',
+    'Change note pitch': 'Canviar altura de la nota',
+    'Move note pitch and timing': 'Moure altura i temps de la nota',
+    edit: 'edició',
+    undo: 'desfer',
+    redo: 'refer',
+    restore: 'restaurar',
+  },
+};
+
+const UI_DYNAMIC_TRANSLATION_RULES = {
+  es: [
+    { re: /^Comparison finished\. (\d+)\/2 model\(s\) produced MIDI\.$/, fmt: m => `Comparación terminada. ${m[1]}/2 modelo(s) generaron MIDI.` },
+    { re: /^Comparison finished with errors in both models\.$/, fmt: () => 'La comparación terminó con errores en ambos modelos.' },
+    { re: /^Running model comparison…$/, fmt: () => 'Ejecutando comparación de modelos…' },
+    { re: /^Comparing: (.+)…$/, fmt: m => `Comparando: ${m[1]}…` },
+    { re: /^(.+) result loaded from comparison\.$/, fmt: m => `Resultado de ${m[1]} cargado desde la comparación.` },
+    { re: /^(.+) comparison completed\.$/, fmt: m => `Comparación de ${m[1]} completada.` },
+    { re: /^(.+) comparison failed\.$/, fmt: m => `Comparación de ${m[1]} fallida.` },
+    { re: /^Model switched to (.+)\. Press Convert to re-transcribe the same audio\.$/, fmt: m => `Modelo cambiado a ${m[1]}. Pulsa Convert para transcribir de nuevo el mismo audio.` },
+    { re: /^Saved locally: (.+)$/, fmt: m => `Guardado localmente: ${m[1]}` },
+    { re: /^Restore to (.+)$/, fmt: m => `Restaurar a ${m[1]}` },
+    { re: /^Undo · (.+)$/, fmt: m => `Deshacer · ${_translateStaticString(m[1], 'es')}` },
+    { re: /^Redo · (.+)$/, fmt: m => `Rehacer · ${_translateStaticString(m[1], 'es')}` },
+    { re: /^Restore · (.+)$/, fmt: m => `Restaurar · ${_translateStaticString(m[1], 'es')}` },
+  ],
+  ca: [
+    { re: /^Comparison finished\. (\d+)\/2 model\(s\) produced MIDI\.$/, fmt: m => `Comparació acabada. ${m[1]}/2 model(s) han generat MIDI.` },
+    { re: /^Comparison finished with errors in both models\.$/, fmt: () => 'La comparació ha acabat amb errors en tots dos models.' },
+    { re: /^Running model comparison…$/, fmt: () => 'Executant comparació de models…' },
+    { re: /^Comparing: (.+)…$/, fmt: m => `Comparant: ${m[1]}…` },
+    { re: /^(.+) result loaded from comparison\.$/, fmt: m => `Resultat de ${m[1]} carregat des de la comparació.` },
+    { re: /^(.+) comparison completed\.$/, fmt: m => `Comparació de ${m[1]} completada.` },
+    { re: /^(.+) comparison failed\.$/, fmt: m => `Comparació de ${m[1]} fallida.` },
+    { re: /^Model switched to (.+)\. Press Convert to re-transcribe the same audio\.$/, fmt: m => `Model canviat a ${m[1]}. Prem Convert per transcriure de nou el mateix àudio.` },
+    { re: /^Saved locally: (.+)$/, fmt: m => `Desat localment: ${m[1]}` },
+    { re: /^Restore to (.+)$/, fmt: m => `Restaurar a ${m[1]}` },
+    { re: /^Undo · (.+)$/, fmt: m => `Desfer · ${_translateStaticString(m[1], 'ca')}` },
+    { re: /^Redo · (.+)$/, fmt: m => `Refer · ${_translateStaticString(m[1], 'ca')}` },
+    { re: /^Restore · (.+)$/, fmt: m => `Restaurar · ${_translateStaticString(m[1], 'ca')}` },
+  ],
+};
+
+function _replaceAllLiteral(source, search, replacement) {
+  if (!search || search === replacement) return source;
+  if (!source.includes(search)) return source;
+  return source.split(search).join(replacement);
+}
+
+function _translateDynamicString(trimmed, lang) {
+  const rules = UI_DYNAMIC_TRANSLATION_RULES[lang] || [];
+  for (let i = 0; i < rules.length; i += 1) {
+    const rule = rules[i];
+    const match = trimmed.match(rule.re);
+    if (!match) continue;
+    return typeof rule.fmt === 'function' ? rule.fmt(match) : trimmed;
+  }
+  return '';
+}
+
+function _uiText(raw) {
+  const value = String(raw || '');
+  const lang = normalizeUiLanguage(state.uiLanguage);
+  if (lang === 'en') return value;
+  return _translateStaticString(value, lang);
+}
+
+function _tk(key, vars = {}, fallback = '') {
+  const lang = normalizeUiLanguage(state.uiLanguage);
+  return translateKey(lang, key, vars, fallback);
+}
+
+function _uiFormat(template, values = {}) {
+  let output = _uiText(template);
+  Object.keys(values).forEach(key => {
+    output = output.split(`{${key}}`).join(String(values[key]));
+  });
+  return output;
+}
+
+function _translateStaticString(raw, lang) {
+  const table = UI_STATIC_TRANSLATIONS[lang];
+  if (!table) return raw;
+  const source = String(raw || '');
+  const trimmed = source.trim();
+  if (!trimmed) return source;
+
+  const exact = table[trimmed];
+  if (typeof exact === 'string' && exact) {
+    return source.replace(trimmed, exact);
+  }
+
+  const dynamic = _translateDynamicString(trimmed, lang);
+  if (dynamic) {
+    return source.replace(trimmed, dynamic);
+  }
+
+  let translated = source;
+  const keys = Object.keys(table).sort((a, b) => b.length - a.length);
+  keys.forEach(key => {
+    if (!key || key.length < 4) return;
+    translated = _replaceAllLiteral(translated, key, table[key]);
+  });
+  return translated;
+}
+
+function _collectTranslatableTextNodes(root) {
+  if (!root) return [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node) continue;
+    const parent = node.parentElement;
+    if (!parent) continue;
+    if (['SCRIPT', 'STYLE', 'TEXTAREA'].includes(parent.tagName)) continue;
+    const raw = node.nodeValue || '';
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (!/[A-Za-z]/.test(trimmed)) continue;
+    nodes.push(node);
+  }
+  return nodes;
+}
+
+function _applyStaticUiLanguage(root, lang) {
+  if (!root || (lang !== 'es' && lang !== 'ca')) return;
+  const textNodes = _collectTranslatableTextNodes(root);
+  textNodes.forEach(node => {
+    node.nodeValue = _translateStaticString(node.nodeValue, lang);
+  });
+
+  root.querySelectorAll('input[placeholder], [title], [aria-label]').forEach(el => {
+    if (el.hasAttribute('placeholder')) {
+      const next = _translateStaticString(el.getAttribute('placeholder') || '', lang);
+      el.setAttribute('placeholder', next);
+    }
+    if (el.hasAttribute('title')) {
+      const next = _translateStaticString(el.getAttribute('title') || '', lang);
+      el.setAttribute('title', next);
+    }
+    if (el.hasAttribute('aria-label')) {
+      const next = _translateStaticString(el.getAttribute('aria-label') || '', lang);
+      el.setAttribute('aria-label', next);
+    }
+  });
+}
+
+function applyUiLanguage() {
+  const appRoot = document.querySelector('.widi-app');
+  if (!appRoot) return;
+  const lang = normalizeUiLanguage(state.uiLanguage);
+  state.uiLanguage = lang;
+
+  if (lang === 'es' || lang === 'ca') {
+    _applyStaticUiLanguage(appRoot, lang);
+    document.documentElement.lang = lang;
+    return;
+  }
+  document.documentElement.lang = 'en';
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // ROUTER + LAYOUT + INIT
 // ═══════════════════════════════════════════════════════════════════
@@ -6098,19 +8127,32 @@ function _renderHeader() {
         <p class="w-logo-sub">Wave MIDI AI</p>
       </div>
     </button>`;
+  const langSwitcherHtml = `
+    <div class="w-lang-switch" aria-label="Language switch">
+      <button type="button" class="w-lang-btn ${state.uiLanguage === 'en' ? 'active' : ''}" data-ui-lang="en">EN</button>
+      <button type="button" class="w-lang-btn ${state.uiLanguage === 'es' ? 'active' : ''}" data-ui-lang="es">ES</button>
+      <button type="button" class="w-lang-btn ${state.uiLanguage === 'ca' ? 'active' : ''}" data-ui-lang="ca">CA</button>
+    </div>`;
 
   if (state.page === 'home') {
     _appHeader.classList.add('w-header-home');
-    _appHeader.innerHTML = `${logoHtml}`;
+    _appHeader.innerHTML = `
+      ${logoHtml}
+      <div class="w-header-right">
+        ${langSwitcherHtml}
+      </div>`;
   } else {
     _appHeader.classList.remove('w-header-home');
     _appHeader.innerHTML = `
       ${logoHtml}
-      <nav class="w-nav">
-        <button class="w-nav-btn" data-app-nav="dashboard">Dashboard</button>
-        <button class="w-nav-btn" data-app-nav="history">History</button>
-        <button class="w-nav-btn" data-app-nav="settings">Settings</button>
-      </nav>`;
+      <div class="w-header-right">
+        <nav class="w-nav">
+          <button class="w-nav-btn" data-app-nav="dashboard">Dashboard</button>
+          <button class="w-nav-btn" data-app-nav="history">History</button>
+          <button class="w-nav-btn" data-app-nav="settings">Settings</button>
+        </nav>
+        ${langSwitcherHtml}
+      </div>`;
     _appHeader.querySelectorAll('[data-app-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
         if (typeof _navigateToPage === 'function') _navigateToPage(btn.dataset.appNav);
@@ -6120,6 +8162,17 @@ function _renderHeader() {
 
   _appHeader.querySelector('[data-header-home]')?.addEventListener('click', () => {
     if (typeof _navigateToPage === 'function') _navigateToPage('home');
+  });
+  _appHeader.querySelectorAll('[data-ui-lang]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextLang = normalizeUiLanguage(btn.dataset.uiLang);
+      if (nextLang === state.uiLanguage) return;
+      state.uiLanguage = nextLang;
+      persistUiLanguageSettings();
+      _renderHeader();
+      const content = document.getElementById('w-content');
+      if (content) renderPage(content);
+    });
   });
 
   _syncNavButtons();
@@ -6135,6 +8188,7 @@ function renderPage(content) {
   } else if (state.page === 'settings') {
     renderSettings(content);
   }
+  applyUiLanguage();
 }
 
 export function init(container) {
@@ -6143,6 +8197,7 @@ export function init(container) {
   bindAudioUnlock();
   bindTransportShortcuts();
   persistAppSettings();
+  persistUiLanguageSettings();
 
   // Background glow orbs
   const orbLayer = document.createElement('div');
@@ -6179,6 +8234,7 @@ export function init(container) {
   _renderHeader();
   renderPage(content);
   hydrateStoredAudio(content);
+  hydrateHistoryEntries(content);
 
   // Cleanup on unmount
   return () => {
