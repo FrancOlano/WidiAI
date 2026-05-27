@@ -98,6 +98,7 @@ const STORAGE_KEYS = {
   lastAudioId: 'widi.lastAudioId',
   apiUrl: 'widi.apiUrl',
   noteGuideOpen: 'widi.noteGuideOpen',
+  settings: 'widi.settings.v1',
 };
 
 const AUDIO_DB = {
@@ -113,37 +114,96 @@ const SF2_SOUND_FONT_URL = '/static/soundfonts/full-grand-piano.sf2';
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
 
-const getConfiguredApiUrl = () => {
+const DEFAULT_SETTINGS = Object.freeze({
+  autoConvert: false,
+  velocitySensitivity: 80,
+  notificationsOn: true,
+  preferSf2Playback: true,
+});
+
+const clampSettingNumber = (value, min, max, fallback) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+};
+
+const normalizeModelId = (model) => {
+  const value = String(model || '').trim().toLowerCase();
+  if (value === 'onsets' || value === 'own') return 'onsets_and_frames';
+  return MODEL_IDS.includes(value) ? value : '';
+};
+
+const getDefaultApiUrlValue = () => {
   const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
     ? window.__WIDI_ENV__.API_URL.trim()
     : '';
-  const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
-  const base = fromStorage || fromEnv || window.location.origin;
+  return fromEnv || window.location.origin;
+};
+
+const normalizeApiUrl = (rawUrl) => {
+  const trimmed = String(rawUrl || '').trim();
+  const base = trimmed || getDefaultApiUrlValue();
   return base.replace(/\/+$/, '');
 };
 
-const getStoredModel = () => {
-  const stored = localStorage.getItem(STORAGE_KEYS.selectedModel);
-  if (stored === 'onsets' || stored === 'own') return 'onsets_and_frames';
-  return MODEL_IDS.includes(stored) ? stored : null;
-};
-
-const persistSelectedModel = (model) => {
-  if (MODEL_IDS.includes(model)) {
-    localStorage.setItem(STORAGE_KEYS.selectedModel, model);
-    window.selectedModel = model;
+const readLocalStorage = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch (_) {
+    return null;
   }
 };
 
+const getConfiguredApiUrl = () => {
+  const fromStorage = readLocalStorage(STORAGE_KEYS.apiUrl) || '';
+  return normalizeApiUrl(fromStorage || getDefaultApiUrlValue());
+};
+
+const getStoredModel = () => {
+  const normalized = normalizeModelId(readLocalStorage(STORAGE_KEYS.selectedModel));
+  return normalized || null;
+};
+
+const persistSelectedModel = (model) => {
+  const normalized = normalizeModelId(model);
+  if (!normalized) return;
+  try {
+    localStorage.setItem(STORAGE_KEYS.selectedModel, normalized);
+  } catch (_) {}
+  window.selectedModel = normalized;
+};
+
 const getStoredGuideOpen = () => {
-  const stored = localStorage.getItem(STORAGE_KEYS.noteGuideOpen);
+  const stored = readLocalStorage(STORAGE_KEYS.noteGuideOpen);
   if (stored === '0') return false;
   if (stored === '1') return true;
   return true;
 };
 
 const persistGuideOpen = (open) => {
-  localStorage.setItem(STORAGE_KEYS.noteGuideOpen, open ? '1' : '0');
+  try {
+    localStorage.setItem(STORAGE_KEYS.noteGuideOpen, open ? '1' : '0');
+  } catch (_) {}
+};
+
+const getStoredSettings = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.settings);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      apiUrl: normalizeApiUrl(parsed.apiUrl),
+      selectedModel: normalizeModelId(parsed.selectedModel) || 'transkun',
+      autoConvert: Boolean(parsed.autoConvert),
+      velocitySensitivity: Math.round(clampSettingNumber(parsed.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
+      notificationsOn: parsed.notificationsOn !== false,
+      preferSf2Playback: parsed.preferSf2Playback !== false,
+    };
+  } catch (error) {
+    console.warn('Failed to load stored settings:', error);
+    return null;
+  }
 };
 
 
@@ -228,7 +288,9 @@ const hydrateStoredAudio = async (content) => {
     const entry = await loadAudioEntry(lastId);
     if (entry) {
       applyAudioEntryToState(entry);
-      renderDashboard(content);
+      if (state.page === 'dashboard') {
+        renderDashboard(content);
+      }
     }
   } catch (error) {
     console.warn('Failed to load stored audio:', error);
@@ -253,14 +315,15 @@ const resolveAudioForTranscription = async () => {
 
 const storedModel = getStoredModel();
 const storedGuideOpen = getStoredGuideOpen();
+const storedSettings = getStoredSettings();
 
 const state = {
-  page: 'dashboard',
-  apiUrl: getConfiguredApiUrl(),
+  page: 'home',
+  apiUrl: storedSettings?.apiUrl || getConfiguredApiUrl(),
   // Dashboard
   stage: 'idle',   // idle | loaded | processing | ready
   isRecording: false,
-  selectedModel: storedModel || 'transkun',
+  selectedModel: storedSettings?.selectedModel || storedModel || 'transkun',
   progress: 0,
   midiPlaying: false,
   midiTime: 0,
@@ -276,6 +339,10 @@ const state = {
   noteEditMode: false,
   noteEditorView: 'roll',
   noteGuideOpen: storedGuideOpen,
+  noteHistoryOpen: false,
+  scoreReadableMode: false,
+  fingerSuggestionMode: false,
+  fingerSuggestionLevel: 'beginner',
   rollZoomX: 1,
   rollZoomY: 1,
   scoreZoomX: 1,
@@ -287,12 +354,10 @@ const state = {
   histSearch: '', histStatus: 'all', histModel: 'all', histSort: 'date',
   histDeleted: new Set(), histSortOpen: false,
   // Settings
-  inputDevice: 'Default Microphone', sampleRate: '44100 Hz', bitDepth: '24-bit',
-  noiseReduction: true, silenceTrim: true, defaultModel: 'TransKun',
-  processingQuality: 'High', autoConvert: false, velocitySensitivity: 80,
-  quantization: '1/16', includeSustain: true, defaultFormat: 'MIDI Type 1',
-  tempoDetection: true, autoSave: true, notificationsOn: true,
-  storageLimit: '5 GB', settingsSaved: false,
+  autoConvert: storedSettings?.autoConvert ?? DEFAULT_SETTINGS.autoConvert,
+  velocitySensitivity: storedSettings?.velocitySensitivity ?? DEFAULT_SETTINGS.velocitySensitivity,
+  notificationsOn: storedSettings?.notificationsOn ?? DEFAULT_SETTINGS.notificationsOn,
+  preferSf2Playback: storedSettings?.preferSf2Playback ?? DEFAULT_SETTINGS.preferSf2Playback,
 };
 
 // Mutable references (not state, just handles)
@@ -312,10 +377,18 @@ let _sf2InitPromise = null, _sf2UnavailableReason = '';
 let _notesUndoStack = [];
 let _notesRedoStack = [];
 let _lastCommittedNotesSnapshot = null;
+let _editHistoryEntries = [];
+let _appHeader = null;
+let _navigateToPage = null;
+let _dashboardUiCache = null;
 
 const fmtTime = s => (!isFinite(s) || isNaN(s)) ? '0:00' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-const getMidiDuration = () => state.midiDuration > 0 ? state.midiDuration : DEFAULT_TOTAL_DURATION;
-const getNotesForRoll = () => state.midiNotes.length ? state.midiNotes : MIDI_NOTES;
+const PROCESS_STEP_BOUNDS = [22, 86, 100];
+const getMidiDuration = () => {
+  if (state.midiDuration > 0) return state.midiDuration;
+  return state.stage === 'ready' ? DEFAULT_TOTAL_DURATION : 0;
+};
+const getNotesForRoll = () => Array.isArray(state.midiNotes) ? state.midiNotes : [];
 const getBackendModel = () => state.selectedModel;
 const setStatusMessage = (message, type = 'info') => {
   state.statusMessage = message;
@@ -326,12 +399,69 @@ const clearStatusMessage = () => {
   state.statusType = 'info';
 };
 
+const getSettingsSnapshot = () => ({
+  apiUrl: normalizeApiUrl(state.apiUrl),
+  selectedModel: normalizeModelId(state.selectedModel) || 'transkun',
+  autoConvert: Boolean(state.autoConvert),
+  velocitySensitivity: Math.round(clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
+  notificationsOn: Boolean(state.notificationsOn),
+  preferSf2Playback: Boolean(state.preferSf2Playback),
+});
+
+function persistAppSettings() {
+  const snapshot = getSettingsSnapshot();
+  state.apiUrl = snapshot.apiUrl;
+  state.selectedModel = snapshot.selectedModel;
+  state.autoConvert = snapshot.autoConvert;
+  state.velocitySensitivity = snapshot.velocitySensitivity;
+  state.notificationsOn = snapshot.notificationsOn;
+  state.preferSf2Playback = snapshot.preferSf2Playback;
+  persistSelectedModel(snapshot.selectedModel);
+  try {
+    localStorage.setItem(STORAGE_KEYS.apiUrl, snapshot.apiUrl);
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn('Failed to persist app settings:', error);
+  }
+}
+
+const getVelocitySensitivityGain = () => {
+  const normalized = clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity) / 127;
+  return 0.35 + (normalized * 1.3);
+};
+
+const applyVelocitySensitivity = (velocityNorm) => {
+  const base = Math.min(1, Math.max(0.02, Number(velocityNorm) || 0.8));
+  return Math.min(1, Math.max(0.02, base * getVelocitySensitivityGain()));
+};
+
+function notifyConversionEvent(title, body) {
+  if (!state.notificationsOn) return;
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    try { new Notification(title, { body }); } catch (_) {}
+    return;
+  }
+  if (Notification.permission === 'default') {
+    Notification.requestPermission()
+      .then(permission => {
+        if (permission === 'granted') {
+          try { new Notification(title, { body }); } catch (_) {}
+        }
+      })
+      .catch(() => {});
+  }
+}
+
 function _cloneNotes(notes) {
   return (Array.isArray(notes) ? notes : []).map(note => ({
     note: Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(note.note) || MIDI_LO))),
     startTime: Math.max(0, Number(note.startTime) || 0),
     duration: Math.max(0.03, Number(note.duration) || 0.12),
     velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+    ...(Number.isInteger(Number(note.fingerOverride)) && Number(note.fingerOverride) >= 1 && Number(note.fingerOverride) <= 5
+      ? { fingerOverride: Math.round(Number(note.fingerOverride)) }
+      : {}),
   }));
 }
 
@@ -344,7 +474,9 @@ function _notesEqual(a, b) {
       na.note !== nb.note ||
       Math.abs((na.startTime || 0) - (nb.startTime || 0)) > 0.0001 ||
       Math.abs((na.duration || 0) - (nb.duration || 0)) > 0.0001 ||
-      na.velocity !== nb.velocity
+      na.velocity !== nb.velocity ||
+      (Number.isFinite(Number(na.fingerOverride)) ? Math.round(Number(na.fingerOverride)) : 0) !==
+      (Number.isFinite(Number(nb.fingerOverride)) ? Math.round(Number(nb.fingerOverride)) : 0)
     ) {
       return false;
     }
@@ -361,17 +493,34 @@ function _replaceMidiNotesInPlace(nextNotes) {
   state.midiNotes.splice(0, state.midiNotes.length, ...next);
 }
 
+function _recordEditHistory(action, type = 'edit') {
+  const label = String(action || 'Edit notes').trim();
+  const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  _editHistoryEntries.unshift({
+    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    action: label,
+    type,
+    stamp,
+    notes: _cloneNotes(state.midiNotes),
+  });
+  if (_editHistoryEntries.length > 120) _editHistoryEntries.pop();
+}
+
 function _resetEditHistory() {
   _notesUndoStack = [];
   _notesRedoStack = [];
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _editHistoryEntries = [];
 }
 
-function _pushUndoSnapshotIfNeeded() {
+function _pushUndoSnapshotIfNeeded(action = 'Edit notes') {
   const current = _cloneNotes(state.midiNotes);
   if (_lastCommittedNotesSnapshot && _notesEqual(current, _lastCommittedNotesSnapshot)) return false;
   if (_lastCommittedNotesSnapshot) {
-    _notesUndoStack.push(_cloneNotes(_lastCommittedNotesSnapshot));
+    _notesUndoStack.push({
+      notes: _cloneNotes(_lastCommittedNotesSnapshot),
+      action: String(action || 'Edit notes').trim(),
+    });
     if (_notesUndoStack.length > 120) _notesUndoStack.shift();
   }
   _notesRedoStack = [];
@@ -379,52 +528,103 @@ function _pushUndoSnapshotIfNeeded() {
   return true;
 }
 
-function _applyEditorNotesCommit(content, notes) {
+function _applyEditorNotesCommit(content, notes, action = 'Edit notes') {
   if (state.stage !== 'ready') return false;
   _replaceMidiNotesInPlace(notes);
-  const changed = _pushUndoSnapshotIfNeeded();
+  const changed = _pushUndoSnapshotIfNeeded(action);
   if (!changed) {
     _updateSeek(content);
     _syncEditToolbar(content);
     return false;
   }
+  _recordEditHistory(action, 'edit');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) {
     console.warn('MIDI notes changed, but MIDI export refresh failed.');
   }
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
 }
 
 function _undoNoteEdit(content) {
   if (state.stage !== 'ready' || state.midiPlaying || !_notesUndoStack.length) return false;
-  const snapshot = _notesUndoStack.pop();
-  _notesRedoStack.push(_cloneNotes(state.midiNotes));
+  const snapshotEntry = _notesUndoStack.pop();
+  const action = snapshotEntry?.action || 'Edit notes';
+  _notesRedoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action,
+  });
   if (_notesRedoStack.length > 120) _notesRedoStack.shift();
-  _replaceMidiNotesInPlace(snapshot);
+  _replaceMidiNotesInPlace(snapshotEntry?.notes || []);
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Undo · ${action}`, 'undo');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) console.warn('Undo applied, but MIDI export refresh failed.');
   if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
 }
 
 function _redoNoteEdit(content) {
   if (state.stage !== 'ready' || state.midiPlaying || !_notesRedoStack.length) return false;
-  const snapshot = _notesRedoStack.pop();
-  _notesUndoStack.push(_cloneNotes(state.midiNotes));
+  const snapshotEntry = _notesRedoStack.pop();
+  const action = snapshotEntry?.action || 'Edit notes';
+  _notesUndoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action,
+  });
   if (_notesUndoStack.length > 120) _notesUndoStack.shift();
-  _replaceMidiNotesInPlace(snapshot);
+  _replaceMidiNotesInPlace(snapshotEntry?.notes || []);
   _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Redo · ${action}`, 'redo');
   const rebuilt = _rebuildMidiBlobFromEditedNotes();
   if (!rebuilt) console.warn('Redo applied, but MIDI export refresh failed.');
   if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
   _updateSeek(content);
   _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
   return true;
+}
+
+function _restoreEditHistoryEntry(content, historyId) {
+  if (state.stage !== 'ready' || state.midiPlaying) return false;
+  const entry = _editHistoryEntries.find(item => item.id === historyId);
+  if (!entry || !Array.isArray(entry.notes)) return false;
+  const targetNotes = _cloneNotes(entry.notes);
+  if (_notesEqual(state.midiNotes, targetNotes)) return false;
+
+  _notesUndoStack.push({
+    notes: _cloneNotes(state.midiNotes),
+    action: `Restore to ${entry.stamp}`,
+  });
+  if (_notesUndoStack.length > 120) _notesUndoStack.shift();
+  _notesRedoStack = [];
+
+  _replaceMidiNotesInPlace(targetNotes);
+  _lastCommittedNotesSnapshot = _cloneNotes(state.midiNotes);
+  _recordEditHistory(`Restore · ${entry.action}`, 'restore');
+
+  const rebuilt = _rebuildMidiBlobFromEditedNotes();
+  if (!rebuilt) console.warn('History restore applied, but MIDI export refresh failed.');
+  if (state.midiTime > getMidiDuration()) state.midiTime = getMidiDuration();
+  _updateSeek(content);
+  _syncEditToolbar(content);
+  _syncHistoryOverlay(content);
+  return true;
+}
+
+function _bindHistoryOverlayActions(content) {
+  if (!content) return;
+  content.querySelectorAll('[data-history-restore]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (state.midiPlaying) return;
+      _restoreEditHistoryEntry(content, btn.dataset.historyRestore);
+    });
+  });
 }
 
 function _syncEditToolbar(content) {
@@ -440,6 +640,20 @@ function _syncEditToolbar(content) {
     guideToggle.textContent = state.noteGuideOpen ? 'Hide Guide' : 'Show Guide';
     guideToggle.classList.toggle('active', state.noteGuideOpen);
   }
+  const historyToggle = content.querySelector('#history-toggle');
+  if (historyToggle) {
+    historyToggle.classList.toggle('active', state.noteHistoryOpen);
+    historyToggle.textContent = state.noteHistoryOpen ? 'Hide History' : 'History';
+  }
+  const fingerToggle = content.querySelector('#finger-suggest-toggle');
+  if (fingerToggle) {
+    fingerToggle.classList.toggle('active', state.fingerSuggestionMode);
+    fingerToggle.textContent = state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels';
+  }
+  const readableToggle = content.querySelector('#score-readable-toggle');
+  if (readableToggle) {
+    readableToggle.classList.toggle('active', state.scoreReadableMode);
+  }
 
   const activeZoomX = state.noteEditorView === 'score' ? state.scoreZoomX : state.rollZoomX;
   const activeZoomY = state.noteEditorView === 'score' ? state.scoreZoomY : state.rollZoomY;
@@ -451,6 +665,11 @@ function _syncEditToolbar(content) {
     const button = content.querySelector(selector);
     if (button) button.disabled = playbackLocked;
   });
+  content.querySelectorAll('[data-finger-set]').forEach(button => {
+    button.disabled = playbackLocked;
+  });
+
+  if (state.noteHistoryOpen) _syncHistoryOverlay(content);
 }
 
 function resetMidiData() {
@@ -469,6 +688,10 @@ function resetMidiData() {
   state.midiTime = 0;
   state.noteEditMode = false;
   state.noteEditorView = 'roll';
+  state.noteHistoryOpen = false;
+  state.scoreReadableMode = false;
+  state.fingerSuggestionMode = false;
+  state.fingerSuggestionLevel = 'beginner';
   state.rollZoomX = 1;
   state.rollZoomY = 1;
   state.scoreZoomX = 1;
@@ -639,9 +862,11 @@ function stopNativePlayback() {
 }
 
 function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
-  if (_sf2Synth) {
+  const normalizedVelocity = applyVelocitySensitivity(velocityNorm);
+
+  if (_sf2Synth && state.preferSf2Playback) {
     const midiNote = Math.max(0, Math.min(127, Math.round(Number(noteNumber) || 0)));
-    const velocity = Math.max(1, Math.min(127, Math.round((Math.min(1, Math.max(0.02, velocityNorm || 0.8))) * 127)));
+    const velocity = Math.max(1, Math.min(127, Math.round(normalizedVelocity * 127)));
     const noteDurationMs = Math.max(25, Math.round(Math.max(0.03, Number(durationSec) || 0.12) * 1000));
     _sf2Synth.midiNoteOn(0, midiNote, velocity);
     const noteOffTimer = setTimeout(() => {
@@ -656,7 +881,7 @@ function triggerNativeNote(noteNumber, durationSec, velocityNorm = 0.85) {
   const ctx = _nativeAudioCtx;
   const now = ctx.currentTime;
   const freq = midiToFrequency(noteNumber);
-  const velocity = Math.min(1, Math.max(0.08, velocityNorm));
+  const velocity = Math.min(1, Math.max(0.08, normalizedVelocity));
 
   const noteDuration = Math.max(0.05, durationSec);
   const release = Math.min(2.4, Math.max(0.55, noteDuration * 0.55));
@@ -845,15 +1070,22 @@ function injectCSS(container) {
 .widi-app input,.widi-app select,.widi-app textarea{font-family:inherit;}
 
 /* Header - Premium Navigation Bar */
-.w-header{display:flex;align-items:center;justify-content:space-between;padding:12px 28px;flex-shrink:0;position:relative;z-index:100;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));backdrop-filter:blur(24px) saturate(180%);box-shadow:0 4px 16px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;}
+.w-header{display:flex;align-items:center;justify-content:space-between;padding:12px 28px;flex-shrink:0;position:sticky;top:0;z-index:120;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(10,10,18,0.95),rgba(7,7,15,0.92));backdrop-filter:blur(24px) saturate(180%);box-shadow:0 4px 16px rgba(0,0,0,0.3),0 1px 0 rgba(255,255,255,0.04) inset;}
 .w-logo{display:flex;align-items:center;gap:14px;}
+.w-logo-btn{border:none;background:transparent;color:inherit;cursor:pointer;padding:0;display:flex;align-items:center;gap:14px;text-align:left;}
 .w-logo-icon{display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);box-shadow:0 4px 12px rgba(139,92,246,0.4),0 0 24px rgba(139,92,246,0.2),0 1px 0 rgba(255,255,255,0.2) inset;flex-shrink:0;position:relative;}
 .w-logo-icon::before{content:'';position:absolute;inset:0;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.15),transparent);pointer-events:none;}
 .w-logo-name{font-size:20px;font-weight:700;letter-spacing:-0.03em;background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:0 2px 8px rgba(139,92,246,0.3);}
 .w-logo-sub{font-size:10px;color:#6b7280;margin-top:2px;letter-spacing:0.06em;text-transform:uppercase;}
 .w-beta{font-size:9px;font-weight:600;letter-spacing:0.1em;background:rgba(139,92,246,0.18);color:#c4b5fd;border:1px solid rgba(139,92,246,0.35);border-radius:6px;padding:3px 8px;box-shadow:0 0 8px rgba(139,92,246,0.2);}
 
-/* Navigation Buttons */
+/* Header navigation */
+.w-header-controls{display:flex;align-items:center;gap:12px;}
+.w-header-launch{border:1px solid rgba(139,92,246,0.42);background:linear-gradient(135deg,#4f7df7 0%,#8b5cf6 100%);color:#eef2ff;font-size:20px;font-weight:700;padding:14px 32px;border-radius:18px;box-shadow:0 12px 28px rgba(99,102,241,0.35),0 1px 0 rgba(255,255,255,0.2) inset;cursor:pointer;transition:transform 0.18s ease,box-shadow 0.18s ease,opacity 0.18s ease;}
+.w-header-launch:hover{transform:translateY(-1px);box-shadow:0 16px 34px rgba(99,102,241,0.42),0 1px 0 rgba(255,255,255,0.24) inset;}
+.w-header-launch.active{opacity:0.72;}
+
+/* Dashboard/History/Settings navigation */
 .w-nav{display:flex;align-items:center;gap:6px;}
 .w-nav-btn{font-size:12px;font-weight:500;padding:7px 16px;border-radius:10px;background:transparent;border:1px solid transparent;color:#6b7280;cursor:pointer;transition:all 0.25s cubic-bezier(0.4,0,0.2,1);position:relative;}
 .w-nav-btn::before{content:'';position:absolute;inset:0;border-radius:10px;background:rgba(255,255,255,0.04);opacity:0;transition:opacity 0.25s;}
@@ -867,6 +1099,32 @@ function injectCSS(container) {
 
 /* Layout */
 .w-content{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative;z-index:1;min-width:0;}
+
+/* Home / Landing */
+.w-home{flex:1;overflow-y:auto;padding:22px 24px 28px;display:flex;flex-direction:column;gap:16px;}
+.w-home-hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px;}
+.w-home-panel{border-radius:20px;padding:22px;background:linear-gradient(145deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px);box-shadow:0 10px 26px rgba(0,0,0,0.28);}
+.w-home-title{font-size:34px;line-height:1.02;font-weight:800;letter-spacing:-0.03em;background:linear-gradient(145deg,#dbeafe 0%,#93c5fd 35%,#c4b5fd 70%,#ddd6fe 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.w-home-sub{margin-top:10px;font-size:14px;color:#cbd5e1;line-height:1.45;max-width:740px;}
+.w-home-actions{margin-top:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.w-home-launch{display:inline-flex;align-items:center;gap:9px;padding:11px 18px;border-radius:12px;border:1px solid rgba(139,92,246,0.42);background:linear-gradient(135deg,rgba(59,130,246,0.32),rgba(139,92,246,0.34));color:#f5f3ff;font-size:12px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;box-shadow:0 8px 22px rgba(79,70,229,0.24);}
+.w-home-launch:hover{transform:translateY(-1px);}
+.w-home-ghost{display:inline-flex;align-items:center;gap:7px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.04);color:#d1d5db;font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;}
+.w-home-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px;}
+.w-home-kpi{border-radius:12px;padding:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);}
+.w-home-kpi p:first-child{font-size:20px;font-weight:800;color:#e9d5ff;line-height:1;}
+.w-home-kpi p:last-child{margin-top:4px;font-size:10px;color:#94a3b8;letter-spacing:0.05em;text-transform:uppercase;}
+.w-home-preview{height:100%;min-height:250px;border-radius:16px;padding:14px;border:1px solid rgba(59,130,246,0.28);background:radial-gradient(circle at 20% 14%,rgba(59,130,246,0.22),transparent 42%),radial-gradient(circle at 84% 76%,rgba(139,92,246,0.26),transparent 46%),rgba(5,8,20,0.84);}
+.w-home-preview-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;height:130px;align-items:end;margin-top:8px;}
+.w-home-preview-note{border-radius:7px 7px 3px 3px;background:linear-gradient(180deg,rgba(96,165,250,0.95),rgba(139,92,246,0.72));box-shadow:0 0 12px rgba(139,92,246,0.4);}
+.w-home-preview-keys{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:2px;height:68px;margin-top:12px;}
+.w-home-preview-key{border-radius:0 0 4px 4px;border:1px solid rgba(255,255,255,0.15);background:linear-gradient(180deg,#f8fafc,#e2e8f0);}
+.w-home-preview-key.black{background:linear-gradient(180deg,#111827,#020617);border-color:rgba(15,23,42,0.7);}
+.w-home-section{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+.w-home-card{border-radius:14px;padding:14px;border:1px solid rgba(255,255,255,0.1);background:linear-gradient(155deg,rgba(255,255,255,0.03),rgba(0,0,0,0.15));}
+.w-home-card h3{font-size:12px;color:#e2e8f0;letter-spacing:0.05em;text-transform:uppercase;}
+.w-home-card p{margin-top:6px;font-size:12px;color:#9ca3af;line-height:1.45;}
+.w-home-pill{display:inline-flex;align-items:center;gap:6px;margin-top:9px;padding:5px 8px;border-radius:999px;border:1px solid rgba(59,130,246,0.32);background:rgba(59,130,246,0.13);font-size:9px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;}
 
 /* Premium Glass Panels */
 .w-panel{border-radius:20px;padding:20px;background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.015));border:1px solid rgba(255,255,255,0.1);backdrop-filter:blur(16px) saturate(160%);box-shadow:0 8px 32px rgba(0,0,0,0.35),0 1px 0 rgba(255,255,255,0.06) inset,0 -1px 0 rgba(0,0,0,0.2) inset;position:relative;min-width:0;}
@@ -987,11 +1245,24 @@ function injectCSS(container) {
 .w-note-edit-btn:hover:not(:disabled){background:rgba(139,92,246,0.14);border-color:rgba(139,92,246,0.34);color:#c4b5fd;}
 .w-note-edit-btn.active{background:rgba(139,92,246,0.2);border-color:rgba(139,92,246,0.44);color:#ddd6fe;box-shadow:0 0 12px rgba(139,92,246,0.22);}
 .w-note-edit-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-score-readable-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
+.w-score-readable-btn:hover:not(:disabled){background:rgba(16,185,129,0.14);border-color:rgba(16,185,129,0.34);color:#86efac;}
+.w-score-readable-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-score-readable-btn.active{background:rgba(16,185,129,0.2);border-color:rgba(16,185,129,0.42);color:#bbf7d0;box-shadow:0 0 12px rgba(16,185,129,0.18);}
 .w-note-guide-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
 .w-note-guide-btn:hover:not(:disabled){background:rgba(59,130,246,0.14);border-color:rgba(59,130,246,0.34);color:#bfdbfe;}
 .w-note-guide-btn:disabled{opacity:0.45;cursor:not-allowed;}
 .w-note-guide-btn.active{background:rgba(59,130,246,0.2);border-color:rgba(59,130,246,0.44);color:#dbeafe;box-shadow:0 0 12px rgba(59,130,246,0.2);}
+.w-finger-suggest-btn{border-radius:8px;padding:6px 10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:#9ca3af;font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;transition:all 0.2s;}
+.w-finger-suggest-btn:hover:not(:disabled){background:rgba(245,158,11,0.14);border-color:rgba(245,158,11,0.34);color:#fde68a;}
+.w-finger-suggest-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.w-finger-suggest-btn.active{background:rgba(245,158,11,0.22);border-color:rgba(245,158,11,0.45);color:#fef3c7;box-shadow:0 0 12px rgba(245,158,11,0.2);}
+.w-finger-level-switch{display:flex;align-items:center;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
+.w-finger-level-btn{border:none;border-radius:7px;padding:5px 9px;background:transparent;color:#9ca3af;font-size:9px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;transition:all 0.2s;}
+.w-finger-level-btn:hover{background:rgba(255,255,255,0.06);color:#d1d5db;}
+.w-finger-level-btn.active{background:linear-gradient(135deg,rgba(245,158,11,0.34),rgba(251,191,36,0.3));color:#fef3c7;box-shadow:0 0 12px rgba(251,191,36,0.2);}
 .w-edit-tools{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(12,12,22,0.7),rgba(10,10,18,0.55));}
+.w-finger-quick{display:flex;align-items:center;gap:5px;padding:4px 7px;border-radius:8px;border:1px solid rgba(245,158,11,0.25);background:rgba(245,158,11,0.08);}
 .w-edit-tool-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid rgba(255,255,255,0.12);border-radius:7px;background:rgba(255,255,255,0.04);color:#d1d5db;padding:5px 9px;font-size:10px;font-weight:700;letter-spacing:0.03em;cursor:pointer;transition:all 0.2s;}
 .w-edit-tool-btn:hover{background:rgba(139,92,246,0.16);border-color:rgba(139,92,246,0.38);}
 .w-edit-tool-btn:disabled{opacity:0.35;cursor:not-allowed;}
@@ -1013,6 +1284,20 @@ function injectCSS(container) {
 .w-guide-tooltip-title{font-size:10px;font-weight:800;color:#ddd6fe;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:5px;}
 .w-guide-tooltip p{font-size:10px;color:#cbd5e1;line-height:1.35;margin-top:3px;}
 .w-guide-tooltip strong{color:#f5f3ff;font-weight:700;}
+.w-edit-history-panel{position:absolute;top:94px;right:12px;z-index:34;width:min(360px,42vw);max-height:min(58vh,420px);display:flex;flex-direction:column;border-radius:12px;border:1px solid rgba(59,130,246,0.34);background:linear-gradient(170deg,rgba(9,12,24,0.97),rgba(10,10,18,0.96));box-shadow:0 12px 28px rgba(0,0,0,0.45);}
+.w-edit-history-head{display:flex;align-items:center;justify-content:space-between;padding:10px 11px;border-bottom:1px solid rgba(255,255,255,0.08);}
+.w-edit-history-head p{font-size:10px;color:#bfdbfe;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;}
+.w-edit-history-meta{font-size:9px;color:#9ca3af;}
+.w-edit-history-list{overflow:auto;padding:7px 8px 8px;display:flex;flex-direction:column;gap:6px;}
+.w-edit-history-item{width:100%;border-radius:8px;padding:7px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);text-align:left;cursor:pointer;transition:all 0.18s;}
+.w-edit-history-item:hover{background:rgba(59,130,246,0.12);border-color:rgba(59,130,246,0.35);}
+.w-edit-history-item:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(59,130,246,0.45);}
+.w-edit-history-item-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.w-edit-history-item p{font-size:10px;color:#e5e7eb;line-height:1.3;}
+.w-edit-history-item span{font-size:9px;color:#9ca3af;}
+.w-edit-history-type{font-size:8px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.06em;padding:1px 5px;border-radius:999px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.15);}
+.w-edit-history-item-sub{display:block;margin-top:4px;font-size:8px;color:#6b7280;letter-spacing:0.03em;text-transform:uppercase;}
+.w-edit-history-empty{padding:18px 10px 20px;text-align:center;font-size:10px;color:#6b7280;}
 .w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
 .w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
 
@@ -1109,6 +1394,15 @@ function injectCSS(container) {
 .w-fade-in{animation:fadeIn 0.25s ease;}
 
 @media (max-width: 1040px){
+  .w-header{padding:10px 12px;}
+  .w-logo-name{font-size:18px;}
+  .w-header-controls{gap:8px;}
+  .w-header-launch{font-size:16px;padding:11px 18px;border-radius:14px;}
+  .w-home{padding:16px 14px 20px;}
+  .w-home-hero{grid-template-columns:minmax(0,1fr);}
+  .w-home-title{font-size:28px;}
+  .w-home-kpis{grid-template-columns:repeat(3,minmax(0,1fr));}
+  .w-home-section{grid-template-columns:minmax(0,1fr);}
   .w-top-grid{grid-template-columns:minmax(0,1fr);}
   .w-piano-wrap.edit-mode{height:clamp(660px,93vh,820px);min-height:660px;}
   .w-piano-wrap.edit-mode .w-piano-body{min-height:430px;}
@@ -1116,6 +1410,7 @@ function injectCSS(container) {
   .w-edit-help-topics{grid-template-columns:repeat(3,minmax(0,1fr));}
   .w-guide-topic:nth-child(5n) .w-guide-tooltip,.w-guide-topic:nth-child(5n-1) .w-guide-tooltip{left:0;right:auto;}
   .w-guide-topic:nth-child(3n) .w-guide-tooltip{left:auto;right:0;}
+  .w-edit-history-panel{left:10px;right:10px;width:auto;max-height:44vh;}
   .w-edit-tools{gap:5px;padding:7px 8px;}
   .w-edit-tool-btn{padding:4px 7px;font-size:9px;}
   .w-score-disclaimer{left:10px;right:10px;max-width:none;}
@@ -1150,6 +1445,481 @@ function midiToDiatonicStep(midi) {
   return octave * 7 + STEP_BY_PC[pc];
 }
 
+function normalizeFingerSuggestionLevel(level) {
+  return String(level || '').trim().toLowerCase() === 'advanced' ? 'advanced' : 'beginner';
+}
+
+function normalizeFingerOverride(rawFinger) {
+  const finger = Math.round(Number(rawFinger));
+  if (!Number.isFinite(finger)) return 0;
+  if (finger < 1 || finger > 5) return 0;
+  return finger;
+}
+
+function _groupNotesByOnset(entries, tolerance = 0.045) {
+  const groups = [];
+  entries.forEach(entry => {
+    const last = groups[groups.length - 1];
+    if (!last || Math.abs(entry.start - last.start) > tolerance) {
+      groups.push({ start: entry.start, notes: [entry] });
+    } else {
+      last.notes.push(entry);
+    }
+  });
+  groups.forEach(group => {
+    group.notes.sort((a, b) => a.midi - b.midi);
+  });
+  return groups;
+}
+
+function _meanMidi(entries, fallback) {
+  if (!Array.isArray(entries) || !entries.length) return fallback;
+  let total = 0;
+  entries.forEach(entry => { total += entry.midi; });
+  return total / entries.length;
+}
+
+function _chooseEventHandSplit(groupNotes, leftCenter, rightCenter, splitMidi, level) {
+  const notes = Array.isArray(groupNotes) ? groupNotes : [];
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  const wideSpan = notes.length > 1 ? (notes[notes.length - 1].midi - notes[0].midi) : 0;
+
+  let best = { cut: 0, cost: Number.POSITIVE_INFINITY };
+  for (let cut = 0; cut <= notes.length; cut += 1) {
+    const left = notes.slice(0, cut);
+    const right = notes.slice(cut);
+    let cost = 0;
+
+    left.forEach(note => {
+      cost += Math.abs(note.midi - leftCenter) * 0.82;
+      cost += Math.max(0, note.midi - (splitMidi + 2)) * (advanced ? 0.9 : 1.3);
+    });
+    right.forEach(note => {
+      cost += Math.abs(note.midi - rightCenter) * 0.82;
+      cost += Math.max(0, (splitMidi - 2) - note.midi) * (advanced ? 0.9 : 1.3);
+    });
+
+    if (left.length > 5 || right.length > 5) cost += 1000;
+    if (wideSpan >= 9 && (!left.length || !right.length)) cost += advanced ? 2.6 : 4.4;
+    if (wideSpan <= 4 && left.length && right.length) cost += advanced ? 0.35 : 0.7;
+
+    if (left.length && right.length) {
+      const topLeft = left[left.length - 1].midi;
+      const lowRight = right[0].midi;
+      cost += Math.max(0, 2 - (lowRight - topLeft)) * (advanced ? 0.6 : 1.0);
+      if ((left.length === 1 || right.length === 1) && wideSpan <= 5) cost += 0.35;
+    }
+
+    if (cost < best.cost) best = { cut, cost };
+  }
+  return best.cut;
+}
+
+function _midiKeyPosCm(midi) {
+  const normalized = clampMidi(midi);
+  const keybSize = 16.5;
+  const k = keybSize / 7.0;
+  const step = (normalized % 12) * k;
+  return keybSize * Math.floor(normalized / 12) + step;
+}
+
+function _buildHandInternalNotes(entries, hand, level) {
+  const notes = [];
+  if (!Array.isArray(entries) || !entries.length) return notes;
+  const groups = _groupNotesByOnset(entries, 0.04);
+  const stagger = normalizeFingerSuggestionLevel(level) === 'advanced' ? 0.035 : 0.05;
+  let chordId = 0;
+  let noteId = 0;
+  const mirror = hand === 'left' ? -1 : 1;
+
+  groups.forEach(group => {
+    const g = group.notes.slice().sort((a, b) => a.midi - b.midi);
+    if (g.length === 1) {
+      const n = g[0];
+      notes.push({
+        index: n.index,
+        noteID: noteId++,
+        pitch: n.midi,
+        x: _midiKeyPosCm(n.midi) * mirror,
+        time: n.start,
+        duration: Math.max(0.03, n.duration),
+        isBlack: BLACK_S.has(n.midi % 12),
+        isChord: false,
+        chordID: -1,
+        chordnr: 0,
+        NinChord: 0,
+        fingering: 0,
+        anchorFinger: n.override || 0,
+      });
+      return;
+    }
+
+    g.forEach((n, idx) => {
+      const offset = stagger * (g.length - idx - 1);
+      notes.push({
+        index: n.index,
+        noteID: noteId++,
+        pitch: n.midi,
+        x: _midiKeyPosCm(n.midi) * mirror,
+        time: n.start - offset,
+        duration: Math.max(0.03, n.duration) + (stagger * (g.length - 1)),
+        isBlack: BLACK_S.has(n.midi % 12),
+        isChord: true,
+        chordID: chordId,
+        chordnr: idx,
+        NinChord: g.length,
+        fingering: 0,
+        anchorFinger: n.override || 0,
+      });
+    });
+    chordId += 1;
+  });
+  return notes;
+}
+
+function _createHandModel(hand, level) {
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  const sizeFactors = { XXS: 0.33, XS: 0.46, S: 0.64, M: 0.82, L: 1.0, XL: 1.1, XXL: 1.2 };
+  const sizeKey = advanced ? 'L' : 'M';
+  const hf = sizeFactors[sizeKey] || sizeFactors.M;
+  const frest = [null, -7.0, -2.8, 0.0, 2.8, 5.6];
+  for (let i = 1; i <= 5; i += 1) frest[i] *= hf;
+  return {
+    LR: hand,
+    hf,
+    frest,
+    weights: [null, 1.1, 1.0, 1.1, 0.9, 0.8],
+    bfactor: [null, 0.3, 1.0, 1.1, 0.8, 0.7],
+    fingers: [1, 2, 3, 4, 5],
+    depth: advanced ? 9 : 7,
+    autodepth: true,
+    preservePostureMemory: false,
+    relocationAlpha: 0.3,
+    hasPositionState: false,
+    maxSpanCm: 21.0 * hf,
+    maxFollowLagCm: 2.5 * hf,
+    minFingerGapCm: 0.15 * hf,
+    fingerPositions: frest.slice(),
+  };
+}
+
+function _relaxedTargets(model, finger, noteX) {
+  const ifx = model.frest[finger];
+  if (ifx == null) return {};
+  const targets = {};
+  for (let j = 1; j <= 5; j += 1) {
+    const jfx = model.frest[j];
+    if (jfx == null) continue;
+    targets[j] = (jfx - ifx) + noteX;
+  }
+  return targets;
+}
+
+function _applyPositionConstraints(model, fingerPositions, activeFinger, noteX, targets) {
+  for (let j = 1; j <= 5; j += 1) {
+    if (j === activeFinger) continue;
+    const pos = fingerPositions[j];
+    const target = targets[j];
+    if (!Number.isFinite(pos) || !Number.isFinite(target)) continue;
+    const lag = pos - target;
+    if (lag > model.maxFollowLagCm) fingerPositions[j] = target + model.maxFollowLagCm;
+    else if (lag < -model.maxFollowLagCm) fingerPositions[j] = target - model.maxFollowLagCm;
+  }
+
+  for (let j = 2; j <= 5; j += 1) {
+    const a = fingerPositions[j - 1];
+    const b = fingerPositions[j];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    const minAllowed = a + model.minFingerGapCm;
+    if (b < minAllowed) fingerPositions[j] = minAllowed;
+  }
+
+  if (Number.isFinite(fingerPositions[1]) && Number.isFinite(fingerPositions[5])) {
+    const span = fingerPositions[5] - fingerPositions[1];
+    if (span > model.maxSpanCm) {
+      const limit = model.maxSpanCm / 2.0;
+      for (let j = 1; j <= 5; j += 1) {
+        if (j === activeFinger || !Number.isFinite(fingerPositions[j])) continue;
+        const off = fingerPositions[j] - noteX;
+        if (off > limit) fingerPositions[j] = noteX + limit;
+        else if (off < -limit) fingerPositions[j] = noteX - limit;
+      }
+    }
+  }
+  fingerPositions[activeFinger] = noteX;
+}
+
+function _setFingerPositions(model, fingering, notes, idx, fingerPositions = model.fingerPositions, forceRelaxed = false) {
+  const fi = fingering[idx];
+  const note = notes[idx];
+  if (!note || !fi) return;
+  const noteX = note.x;
+  const targets = _relaxedTargets(model, fi, noteX);
+  if (!targets || !Object.keys(targets).length) return;
+
+  if (forceRelaxed || !model.preservePostureMemory) {
+    for (let j = 1; j <= 5; j += 1) fingerPositions[j] = Number.isFinite(targets[j]) ? targets[j] : null;
+    fingerPositions[fi] = noteX;
+    if (fingerPositions === model.fingerPositions) model.hasPositionState = true;
+    return;
+  }
+
+  for (let j = 1; j <= 5; j += 1) {
+    const target = targets[j];
+    if (!Number.isFinite(target)) {
+      fingerPositions[j] = null;
+      continue;
+    }
+    if (j === fi) {
+      fingerPositions[j] = noteX;
+      continue;
+    }
+    const prev = fingerPositions[j];
+    if (!Number.isFinite(prev)) fingerPositions[j] = target;
+    else fingerPositions[j] = (model.relocationAlpha * prev) + ((1.0 - model.relocationAlpha) * target);
+  }
+  _applyPositionConstraints(model, fingerPositions, fi, noteX, targets);
+  if (fingerPositions === model.fingerPositions) model.hasPositionState = true;
+}
+
+function _avgVelocity(model, fingering, notes, depth) {
+  const fingerPositions = model.fingerPositions.slice();
+  _setFingerPositions(model, fingering, notes, 0, fingerPositions, false);
+  let vmean = 0;
+  const steps = Math.max(1, depth - 1);
+  for (let i = 1; i < depth; i += 1) {
+    const na = notes[i - 1];
+    const nb = notes[i];
+    const fb = fingering[i];
+    const fingerPos = fingerPositions[fb];
+    if (!na || !nb || !Number.isFinite(fingerPos)) continue;
+    const dx = Math.abs(nb.x - fingerPos);
+    const dt = Math.abs(nb.time - na.time) + 0.1;
+    let v = dx / dt;
+    const weight = model.weights[fb] || 1;
+    if (nb.isBlack) v /= (weight * (model.bfactor[fb] || 1));
+    else v /= weight;
+    vmean += v;
+    _setFingerPositions(model, fingering, notes, i, fingerPositions, false);
+  }
+  return vmean / steps;
+}
+
+function _skipTransition(model, fa, fb, na, nb) {
+  const xba = nb.x - na.x;
+  if (!na.isChord && !nb.isChord) {
+    if (fa === fb && xba !== 0 && na.duration < 4) return true;
+    if (fa > 1) {
+      if (fb > 1 && ((fb - fa) * xba) < 0) return true;
+      if (fb === 1 && nb.isBlack && xba > 0) return true;
+    } else if (na.isBlack && xba < 0 && fb > 1 && na.duration < 2) {
+      return true;
+    }
+  } else if (na.isChord && nb.isChord && na.chordID === nb.chordID) {
+    const axba = (Math.abs(xba) * model.hf) / 0.8;
+    if (fa === fb) return true;
+    if (fa < fb && model.LR === 'left') return true;
+    if (fa > fb && model.LR === 'right') return true;
+    const a = Math.min(fa, fb);
+    const b = Math.max(fa, fb);
+    const thresholds = {
+      '3-4': 5, '4-5': 5, '2-3': 6, '2-4': 7, '3-5': 8, '2-5': 11,
+      '1-2': 12, '1-3': 14, '1-4': 16,
+    };
+    const key = `${a}-${b}`;
+    const limit = thresholds[key];
+    if (Number.isFinite(limit) && axba > limit) return true;
+  }
+  return false;
+}
+
+function _optimizeWindow(model, notes, startFinger, level) {
+  if (!Array.isArray(notes) || !notes.length) return { out: [], vel: 0, depth: 0 };
+  const advanced = normalizeFingerSuggestionLevel(level) === 'advanced';
+  let depth = model.depth;
+
+  if (model.autodepth) {
+    if (notes[0].isChord) {
+      depth = Math.max(3, (notes[0].NinChord - notes[0].chordnr + 1));
+    } else {
+      const t0 = notes[0].time;
+      for (let i = 4; i <= 9; i += 1) {
+        depth = i;
+        if ((notes[i - 1].time - t0) > 3.5) break;
+      }
+    }
+  }
+  depth = Math.max(3, Math.min(depth, advanced ? 9 : 7));
+
+  const uStart = startFinger === 0 ? model.fingers : [startFinger];
+  const candidate = new Array(9).fill(0);
+  let best = new Array(9).fill(0);
+  let minVel = Number.POSITIVE_INFINITY;
+
+  const backtrack = (idx) => {
+    if (idx === depth) {
+      const vel = _avgVelocity(model, candidate, notes, depth);
+      if (vel < minVel) {
+        minVel = vel;
+        best = candidate.slice();
+      }
+      return;
+    }
+    const choices = idx === 0 ? uStart : model.fingers;
+    for (let c = 0; c < choices.length; c += 1) {
+      const finger = choices[c];
+      if (idx > 0 && _skipTransition(model, candidate[idx - 1], finger, notes[idx - 1], notes[idx])) continue;
+      candidate[idx] = finger;
+      backtrack(idx + 1);
+    }
+  };
+  backtrack(0);
+  if (!normalizeFingerOverride(best[0])) {
+    const fallback = normalizeFingerOverride(startFinger) || (model.LR === 'left' ? 5 : 1);
+    best = new Array(9).fill(fallback);
+  }
+  return { out: best, vel: Number.isFinite(minVel) ? minVel : 0, depth };
+}
+
+function _runHandFingering(entries, hand, level, outMap) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  const notes = _buildHandInternalNotes(entries, hand, level);
+  if (!notes.length) return;
+  const model = _createHandModel(hand, level);
+  model.fingerPositions = model.frest.slice();
+  model.hasPositionState = false;
+
+  let startFinger = 0;
+  let out = [];
+  const nTotal = notes.length;
+
+  for (let i = 0; i < nTotal; i += 1) {
+    if (i > nTotal - 11 && model.autodepth) {
+      model.autodepth = false;
+      model.depth = 9;
+    }
+
+    const ninenotes = notes.slice(i, i + 9);
+    if (!ninenotes.length) break;
+    while (ninenotes.length < 9) ninenotes.push(ninenotes[ninenotes.length - 1]);
+
+    const anchor = normalizeFingerOverride(notes[i].anchorFinger);
+    if (anchor) {
+      notes[i].fingering = anchor;
+      const optimized = _optimizeWindow(model, ninenotes, anchor, level);
+      out = optimized.out;
+      startFinger = out.length > 1 ? out[1] : anchor;
+      _setFingerPositions(model, out, ninenotes, 0);
+      continue;
+    }
+
+    let bestFinger = 0;
+    if (i > nTotal - 10) {
+      if (Array.isArray(out) && out.length > 1) {
+        bestFinger = out[1];
+        out = [bestFinger].concat(out.slice(2));
+        startFinger = out.length > 1 ? out[1] : bestFinger;
+      } else {
+        const optimized = _optimizeWindow(model, ninenotes, startFinger, level);
+        out = optimized.out;
+        bestFinger = out[0];
+        startFinger = out.length > 1 ? out[1] : out[0];
+      }
+    } else {
+      const optimized = _optimizeWindow(model, ninenotes, startFinger, level);
+      out = optimized.out;
+      bestFinger = out[0];
+      startFinger = out.length > 1 ? out[1] : out[0];
+    }
+
+    notes[i].fingering = bestFinger;
+    _setFingerPositions(model, out, ninenotes, 0);
+  }
+
+  notes.forEach(n => {
+    const finger = normalizeFingerOverride(n.fingering);
+    if (!finger) return;
+    outMap.set(n.index, { finger, hand });
+  });
+}
+
+function computeFingerSuggestions(notes, level = 'beginner') {
+  const normalizedLevel = normalizeFingerSuggestionLevel(level);
+  const map = new Map();
+  const sourceNotes = Array.isArray(notes) ? notes : [];
+  if (!sourceNotes.length) return { map, splitMidi: 60 };
+
+  const entries = sourceNotes.map((note, index) => {
+    const midi = clampMidi(note.note);
+    return {
+      index,
+      midi,
+      override: normalizeFingerOverride(note.fingerOverride),
+    };
+  });
+  const sortedPitches = entries.map(item => item.midi).sort((a, b) => a - b);
+  const medianPitch = sortedPitches[Math.floor(sortedPitches.length / 2)] || 60;
+  const splitMidi = normalizedLevel === 'advanced'
+    ? Math.max(52, Math.min(68, medianPitch))
+    : 60;
+
+  entries.forEach(entry => {
+    if (!entry.override) return;
+    const resolvedHand = entry.midi <= splitMidi ? 'left' : 'right';
+    map.set(entry.index, {
+      finger: entry.override,
+      hand: resolvedHand,
+    });
+  });
+
+  return { map, splitMidi };
+}
+
+function _drawFingerBadge(ctx, x, y, finger, hand, active = false) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  ctx.save();
+  const safeFinger = Math.max(1, Math.min(5, Number(finger) || 3));
+  const isLeft = hand === 'left';
+  const fingerPalette = {
+    1: ['#14b8a6', '#0f766e'],
+    2: ['#60a5fa', '#1d4ed8'],
+    3: ['#a78bfa', '#6d28d9'],
+    4: ['#f472b6', '#be185d'],
+    5: ['#f59e0b', '#b45309'],
+  };
+  const fillPair = fingerPalette[safeFinger] || fingerPalette[3];
+  const ring = isLeft
+    ? (active ? 'rgba(147,197,253,0.95)' : 'rgba(96,165,250,0.9)')
+    : (active ? 'rgba(253,186,116,0.95)' : 'rgba(251,191,36,0.9)');
+  const fillA = fillPair[0];
+  const fillB = fillPair[1];
+  const radius = active ? 9.2 : 8.4;
+  const gradient = ctx.createLinearGradient(x - radius, y - radius, x + radius, y + radius);
+  gradient.addColorStop(0, fillA);
+  gradient.addColorStop(1, fillB);
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = ring;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(safeFinger), x, y + 0.2);
+  const markerX = isLeft ? (x - radius + 2.4) : (x + radius - 2.4);
+  const markerColor = isLeft ? '#93c5fd' : '#fcd34d';
+  ctx.fillStyle = markerColor;
+  ctx.beginPath();
+  ctx.arc(markerX, y - radius + 2.2, 1.7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 class PianoRoll {
   constructor(container, notes, options = {}) {
     this.container = container;
@@ -1168,8 +1938,16 @@ class PianoRoll {
     this.selectedNoteIndices = new Set();
     this.hoverNoteMode = null;
     this.draggingNote = null;
+    this.lasso = null;
+    this.isLassoSelecting = false;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
+    this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionMap = new Map();
+    this.fingerSuggestionDirty = true;
+    this.fingerSuggestionSignature = '';
+    this.nextFingerSuggestionScanAt = 0;
     this.animId = 0;
     this.lastTs = null;
     this.internalTime = 0;
@@ -1231,6 +2009,67 @@ class PianoRoll {
     this.selectedNoteIndex = -1;
   }
 
+  _rectsIntersect(a, b) {
+    return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
+  }
+
+  _normalizedRect(x1, y1, x2, y2) {
+    const x = Math.min(x1, x2);
+    const y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1);
+    const h = Math.abs(y2 - y1);
+    return { x, y, w, h };
+  }
+
+  _startLasso(x, y, additive = false) {
+    this.isLassoSelecting = true;
+    this.lasso = {
+      startX: x,
+      startY: y,
+      endX: x,
+      endY: y,
+      additive: Boolean(additive),
+    };
+    if (!additive) this._clearSelection();
+    this.canvas.style.cursor = 'crosshair';
+  }
+
+  _updateLasso(x, y) {
+    if (!this.isLassoSelecting || !this.lasso) return;
+    this.lasso.endX = x;
+    this.lasso.endY = y;
+    const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+    if (rect.w < 2 && rect.h < 2) return;
+
+    const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+    this.noteHitboxes.forEach(box => {
+      if (this._rectsIntersect(rect, box)) selected.add(box.index);
+    });
+
+    this.selectedNoteIndices = selected;
+    this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+    this.hoverNoteIndex = -1;
+    this.hoverNoteMode = null;
+  }
+
+  _finishLasso() {
+    if (!this.isLassoSelecting) return;
+    this.isLassoSelecting = false;
+    if (this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      if (rect.w >= 2 || rect.h >= 2) {
+        const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+        this.noteHitboxes.forEach(box => {
+          if (this._rectsIntersect(rect, box)) selected.add(box.index);
+        });
+        this.selectedNoteIndices = selected;
+        this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+      }
+    }
+    this.lasso = null;
+    this.canvas.style.cursor = 'default';
+  }
+
   _getSelectedIndicesOrdered() {
     return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
   }
@@ -1257,7 +2096,7 @@ class PianoRoll {
     this.hoverNoteIndex = -1;
     this.hoverNoteMode = null;
     this._clearSelection();
-    this._emitNotesMutation();
+    this._emitNotesMutation('Delete notes');
     return true;
   }
 
@@ -1291,7 +2130,7 @@ class PianoRoll {
         : 'ew-resize';
       return;
     }
-    if (this.editMode && !this.isPlaying && y < this.H - KEY_H && noteMode) {
+    if (this.editMode && y < this.H - KEY_H && noteMode) {
       this.canvas.style.cursor = (noteMode === 'duration' || noteMode === 'time')
         ? 'ns-resize'
         : 'ew-resize';
@@ -1390,9 +2229,76 @@ class PianoRoll {
     return Math.max(0, this.currentTime + (rollHeight - clampedY) / pps);
   }
 
-  _emitNotesMutation() {
+  _emitNotesMutation(action = 'Edit notes') {
+    this._markFingerSuggestionDirty();
     if (this.onNotesChange) this.onNotesChange(this.notes);
-    if (this.onEditCommit) this.onEditCommit(this.notes);
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+  }
+
+  _markFingerSuggestionDirty() {
+    this.fingerSuggestionDirty = true;
+    this.nextFingerSuggestionScanAt = 0;
+  }
+
+  _buildFingerSuggestionSignature() {
+    const notes = Array.isArray(this.notes) ? this.notes : [];
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    let checksum = 0;
+    for (let i = 0; i < notes.length; i += 1) {
+      const note = notes[i];
+      const midi = clampMidi(note.note);
+      const startBucket = Math.round((Number(note.startTime) || 0) * 100);
+      const durationBucket = Math.round((Number(note.duration) || 0.12) * 100);
+      const fingerOverride = normalizeFingerOverride(note.fingerOverride);
+      checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
+    }
+    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+  }
+
+  _refreshFingerSuggestionCache(force = false) {
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+      return;
+    }
+    if (!force && !this.fingerSuggestionDirty) return;
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionSignature = '';
+    this.fingerSuggestionDirty = false;
+  }
+
+  _hitFingerBadge(x, y) {
+    if (!this.fingerSuggestionMode) return null;
+    for (let i = this.noteHitboxes.length - 1; i >= 0; i -= 1) {
+      const box = this.noteHitboxes[i];
+      if (!box || !box.fingerBadge) continue;
+      const dx = x - box.fingerBadge.x;
+      const dy = y - box.fingerBadge.y;
+      if ((dx * dx) + (dy * dy) <= (box.fingerBadge.r * box.fingerBadge.r)) return box;
+    }
+    return null;
+  }
+
+  _setFingerOverrideForIndices(indices, nextFinger, action = 'Set manual fingering') {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const normalized = normalizeFingerOverride(nextFinger);
+    let changed = false;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const prev = normalizeFingerOverride(note.fingerOverride);
+      if (prev === normalized) return;
+      if (normalized === 0) delete note.fingerOverride;
+      else note.fingerOverride = normalized;
+      changed = true;
+    });
+    if (!changed) return false;
+    this._markFingerSuggestionDirty();
+    if (this.onNotesChange) this.onNotesChange(this.notes);
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+    return true;
   }
 
   _addNoteAt(x, y) {
@@ -1411,7 +2317,7 @@ class PianoRoll {
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
     this._playNote(note.note);
-    this._emitNotesMutation();
+    this._emitNotesMutation('Add note');
     return true;
   }
 
@@ -1468,7 +2374,7 @@ class PianoRoll {
     this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this.hoverNoteMode = 'pitch';
-    this._emitNotesMutation();
+    this._emitNotesMutation('Duplicate notes');
     return true;
   }
 
@@ -1498,6 +2404,7 @@ class PianoRoll {
       });
       if (changed) {
         this.draggingNote.changed = true;
+        this._markFingerSuggestionDirty();
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
       return;
@@ -1517,6 +2424,7 @@ class PianoRoll {
       });
       if (changed) {
         this.draggingNote.changed = true;
+        this._markFingerSuggestionDirty();
         if (this.onNotesChange) this.onNotesChange(this.notes);
       }
       return;
@@ -1536,6 +2444,7 @@ class PianoRoll {
     });
     if (changed) {
       this.draggingNote.changed = true;
+      this._markFingerSuggestionDirty();
       if (this.onNotesChange) this.onNotesChange(this.notes);
     }
   }
@@ -1547,10 +2456,18 @@ class PianoRoll {
     } else {
       this.selectedNoteIndex = this.draggingNote.index;
     }
+    const dragMode = this.draggingNote.mode;
     const changed = Boolean(this.draggingNote.changed);
     this.draggingNote = null;
     this.hoverNoteMode = null;
-    if (shouldCommit && changed && this.onEditCommit) this.onEditCommit(this.notes);
+    if (shouldCommit && changed && this.onEditCommit) {
+      const action = dragMode === 'duration'
+        ? 'Change note duration'
+        : dragMode === 'time'
+          ? 'Move note timing'
+          : 'Change note pitch';
+      this.onEditCommit(this.notes, { action });
+    }
   }
 
   _buildKeys(W) {
@@ -1581,7 +2498,22 @@ class PianoRoll {
     this._h = {
       md: e => {
         const { x, y } = xy(e);
-        if (this.editMode && !this.isPlaying && y < this.H - KEY_H) {
+        if (this.editMode && y < this.H - KEY_H) {
+          if (this.fingerSuggestionMode && e.button === 0) {
+            const fingerHit = this._hitFingerBadge(x, y);
+            if (fingerHit) {
+              if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+              const current = normalizeFingerOverride(fingerHit.noteRef?.fingerOverride) || 0;
+              const next = e.shiftKey
+                ? (current <= 1 ? 5 : current - 1)
+                : (current >= 5 ? 1 : current + 1);
+              this._setFingerOverrideForIndices([fingerHit.index], next, 'Set manual fingering');
+              this.hoverNoteIndex = fingerHit.index;
+              this.hoverNoteMode = 'pitch';
+              this._setCursor(y, 'pitch');
+              return;
+            }
+          }
           const hit = this._hitNote(x, y);
           if (hit) {
             if (e.metaKey || e.ctrlKey) {
@@ -1596,7 +2528,12 @@ class PianoRoll {
             this._startNoteDrag(hit, y);
             return;
           }
+          if (e.button === 0) {
+            this._startLasso(x, y, e.metaKey || e.ctrlKey);
+            return;
+          }
           if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
+          return;
         }
         const k = this._hitTest(x, y);
         if (k) press(k.midi);
@@ -1608,8 +2545,13 @@ class PianoRoll {
           this._setCursor(y, this.draggingNote.mode);
           return;
         }
+        if (this.isLassoSelecting) {
+          this._updateLasso(x, y);
+          this.canvas.style.cursor = 'crosshair';
+          return;
+        }
 
-        const noteHit = this.editMode && !this.isPlaying && y < this.H - KEY_H
+        const noteHit = this.editMode && y < this.H - KEY_H
           ? this._hitNote(x, y)
           : null;
         this.hoverNoteIndex = noteHit ? noteHit.index : -1;
@@ -1620,9 +2562,9 @@ class PianoRoll {
         const k = this._hitTest(x, y);
         if (k && !this.pressedKeys.has(k.midi)) { releaseAll(); press(k.midi); }
       },
-      mu: () => { this._finishNoteDrag(); releaseAll(); },
+      mu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
       ml: () => {
-        if (this.draggingNote) return;
+        if (this.draggingNote || this.isLassoSelecting) return;
         releaseAll();
         this.hoverNoteIndex = -1;
         this.hoverNoteMode = null;
@@ -1633,10 +2575,10 @@ class PianoRoll {
         const { x, y } = xy(e);
         this._updateNoteDrag(x, y);
       },
-      wu: () => { this._finishNoteDrag(); releaseAll(); },
-      wb: () => { this._finishNoteDrag(); releaseAll(); this.canvas.style.cursor = 'default'; },
+      wu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
+      wb: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); this.canvas.style.cursor = 'default'; },
       db: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (y >= this.H - KEY_H) return;
         if (this._hitNote(x, y)) return;
@@ -1644,9 +2586,18 @@ class PianoRoll {
         this._addNoteAt(x, y);
       },
       cm: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (y >= this.H - KEY_H) return;
+        if (this.fingerSuggestionMode) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            e.preventDefault();
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            this._setFingerOverrideForIndices([fingerHit.index], 0, 'Clear manual fingering');
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
@@ -1654,7 +2605,7 @@ class PianoRoll {
         this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
@@ -1708,6 +2659,18 @@ class PianoRoll {
         if (!indices.length) return;
         let changed = false;
 
+        if (this.fingerSuggestionMode && /^[0-5]$/.test(e.key)) {
+          const finger = e.key === '0' ? 0 : Number(e.key);
+          if (this._setFingerOverrideForIndices(
+            indices,
+            finger,
+            finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+          )) {
+            e.preventDefault();
+          }
+          return;
+        }
+
         if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
           const step = e.shiftKey ? 12 : 1;
           const delta = e.key === 'ArrowRight' ? step : -step;
@@ -1738,7 +2701,7 @@ class PianoRoll {
           this.selectedNoteIndex = indices[indices.length - 1];
           this.hoverNoteIndex = this.selectedNoteIndex;
           this.hoverNoteMode = 'pitch';
-          this._emitNotesMutation();
+          this._emitNotesMutation(e.key === 'ArrowRight' || e.key === 'ArrowLeft' ? 'Change note pitch' : 'Move note timing');
           e.preventDefault();
         }
       },
@@ -1856,6 +2819,7 @@ class PianoRoll {
     const PPS = this._getRollPixelsPerSecond();
     const km = new Map(this.keys.map(k => [k.midi, k]));
     const active = new Set();
+    this._refreshFingerSuggestionCache();
     this.notes.forEach(n => { if (time >= n.startTime && time < n.startTime + n.duration) active.add(n.note); });
     this.pressedKeys.forEach(m => active.add(m));
 
@@ -1874,12 +2838,14 @@ class PianoRoll {
       const color=this._noteColor(n.note), x=k.x+1, w=k.w-2, y=Math.max(0,nt), h=Math.min(nb,ROLL_H)-y;
       if(h<=0) return;
 
-      this.noteHitboxes.push({ index, x, y, w, h, noteRef: n });
+      const hitBox = { index, x, y, w, h, noteRef: n };
+      this.noteHitboxes.push(hitBox);
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
       const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const hoverMode = hovered ? this.hoverNoteMode : null;
       const selectedMode = selectedByDrag && this.draggingNote ? this.draggingNote.mode : null;
+      const fingerData = this.fingerSuggestionMode ? this.fingerSuggestionMap.get(index) : null;
 
       ctx.shadowColor=color; ctx.shadowBlur=10; ctx.fillStyle=color; ctx.globalAlpha=0.7+(n.velocity/127)*0.3;
       this._rr(ctx,x,y,w,h,2); ctx.fill(); ctx.globalAlpha=1; ctx.shadowBlur=0;
@@ -1897,8 +2863,31 @@ class PianoRoll {
         ctx.fillStyle = durationMode ? 'rgba(196,181,253,0.95)' : 'rgba(196,181,253,0.55)';
         ctx.fillRect(x + 1, y + 1, Math.max(2, w - 2), 2);
       }
+
+      if (fingerData && h >= 9 && w >= 7) {
+        const bubbleX = x + (w * 0.5);
+        const bubbleY = Math.min(y + 10, y + Math.max(8, h * 0.22));
+        hitBox.fingerBadge = { x: bubbleX, y: bubbleY, r: selected || hovered ? 9.2 : 8.4 };
+        _drawFingerBadge(
+          ctx,
+          bubbleX,
+          bubbleY,
+          fingerData.finger,
+          fingerData.hand,
+          selected || hovered
+        );
+      }
     });
     ctx.shadowBlur=0; ctx.globalAlpha=1;
+
+    if (this.isLassoSelecting && this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      ctx.fillStyle = 'rgba(59,130,246,0.16)';
+      ctx.strokeStyle = 'rgba(147,197,253,0.92)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+    }
 
     const sg=ctx.createLinearGradient(0,ROLL_H,W,ROLL_H);
     sg.addColorStop(0,'rgba(59,130,246,0.15)');sg.addColorStop(0.3,'rgba(139,92,246,0.6)');sg.addColorStop(0.7,'rgba(139,92,246,0.6)');sg.addColorStop(1,'rgba(59,130,246,0.15)');
@@ -2017,10 +3006,19 @@ class PianoRoll {
       ctx.lineWidth=act?1:0.6;
       this._rr(ctx,k.x+0.5,y+2,k.w-1,bkh-2,2); ctx.stroke();
     });
+
   }
 
-  setTime(t) { this.currentTime = t; }
-  setPlaying(p) { this.isPlaying = p; }
+  setTime(t) {
+    const next = Number(t) || 0;
+    if (Math.abs(next - this.currentTime) < 0.0001) return;
+    this.currentTime = next;
+  }
+  setPlaying(p) {
+    const next = Boolean(p);
+    if (next === this.isPlaying) return;
+    this.isPlaying = next;
+  }
   setZoom(x, y) {
     const nextX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
     const nextY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
@@ -2038,6 +3036,30 @@ class PianoRoll {
       this._setup();
     }
   }
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+    const nextMode = Boolean(enabled);
+    const nextLevel = normalizeFingerSuggestionLevel(level);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    if (!changed) return;
+    this.fingerSuggestionMode = nextMode;
+    this.fingerSuggestionLevel = nextLevel;
+    this._markFingerSuggestionDirty();
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+    }
+  }
+
+  applyFingerOverrideToSelection(finger) {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
+    return this._setFingerOverrideForIndices(
+      indices,
+      finger,
+      finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+    );
+  }
   setEditMode(enabled) {
     const next = Boolean(enabled);
     if (next === this.editMode) return;
@@ -2045,6 +3067,7 @@ class PianoRoll {
     this.hoverNoteIndex = -1;
     this.hoverNoteMode = null;
     if (!this.editMode) this._finishNoteDrag(false);
+    this._finishLasso();
     this._clearSelection();
   }
 
@@ -2067,6 +3090,7 @@ class PianoRoll {
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
     this._finishNoteDrag(false);
+    this._finishLasso();
     this.pressedKeys.clear();
     this.scrollHost.remove();
   }
@@ -2087,17 +3111,31 @@ class ScoreEditor {
     this.selectedNoteIndex = -1;
     this.selectedNoteIndices = new Set();
     this.draggingNote = null;
+    this.lasso = null;
+    this.isLassoSelecting = false;
     this.noteHitboxes = [];
     this.layout = null;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
+    this.readableMode = Boolean(options.readableMode);
+    this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
+    this.fingerSuggestionMap = new Map();
+    this.fingerSuggestionDirty = true;
+    this.fingerSuggestionSignature = '';
+    this.nextFingerSuggestionScanAt = 0;
     this.animId = 0;
+    this.viewportW = 0;
+    this.scrollRatio = 0;
 
     this.container.style.overflow = 'hidden';
+    this.scrollHost = document.createElement('div');
+    this.scrollHost.className = 'w-roll-scroll w-score-scroll';
+    this.container.appendChild(this.scrollHost);
+
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = 'display:block;width:100%;height:100%;';
-    this.container.appendChild(this.canvas);
-    this.setZoom(this.zoomX, this.zoomY);
+    this.scrollHost.appendChild(this.canvas);
 
     this._ro = new ResizeObserver(() => this._setup());
     this._ro.observe(container);
@@ -2144,6 +3182,74 @@ class ScoreEditor {
     this.selectedNoteIndex = -1;
   }
 
+  _rectsIntersect(a, b) {
+    return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
+  }
+
+  _normalizedRect(x1, y1, x2, y2) {
+    const x = Math.min(x1, x2);
+    const y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1);
+    const h = Math.abs(y2 - y1);
+    return { x, y, w, h };
+  }
+
+  _hitboxRect(box) {
+    return {
+      x: box.noteX,
+      y: box.noteY,
+      w: box.noteW,
+      h: box.noteH,
+    };
+  }
+
+  _startLasso(x, y, additive = false) {
+    this.isLassoSelecting = true;
+    this.lasso = {
+      startX: x,
+      startY: y,
+      endX: x,
+      endY: y,
+      additive: Boolean(additive),
+    };
+    if (!additive) this._clearSelection();
+    this.canvas.style.cursor = 'crosshair';
+  }
+
+  _updateLasso(x, y) {
+    if (!this.isLassoSelecting || !this.lasso) return;
+    this.lasso.endX = x;
+    this.lasso.endY = y;
+    const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+    if (rect.w < 2 && rect.h < 2) return;
+
+    const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+    this.noteHitboxes.forEach(box => {
+      if (this._rectsIntersect(rect, this._hitboxRect(box))) selected.add(box.index);
+    });
+    this.selectedNoteIndices = selected;
+    this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+    this.hoverNoteIndex = -1;
+  }
+
+  _finishLasso() {
+    if (!this.isLassoSelecting) return;
+    this.isLassoSelecting = false;
+    if (this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      if (rect.w >= 2 || rect.h >= 2) {
+        const selected = this.lasso.additive ? new Set(this.selectedNoteIndices) : new Set();
+        this.noteHitboxes.forEach(box => {
+          if (this._rectsIntersect(rect, this._hitboxRect(box))) selected.add(box.index);
+        });
+        this.selectedNoteIndices = selected;
+        this.selectedNoteIndex = selected.size ? Array.from(selected).sort((a, b) => a - b)[selected.size - 1] : -1;
+      }
+    }
+    this.lasso = null;
+    this._setCursor(null);
+  }
+
   _getSelectedIndicesOrdered() {
     return Array.from(this.selectedNoteIndices).filter(index => index >= 0 && index < this.notes.length).sort((a, b) => a - b);
   }
@@ -2170,7 +3276,7 @@ class ScoreEditor {
     this.hoverNoteIndex = -1;
     this._clearSelection();
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Delete notes');
     return true;
   }
 
@@ -2235,20 +3341,18 @@ class ScoreEditor {
   }
 
   _buildLayout(W, H) {
+    const viewportW = Math.max(240, this.viewportW || W);
     const left = 94;
     const right = 22;
-    const usableW = Math.max(120, W - left - right);
+    const usableW = Math.max(120, viewportW - left - right);
     const totalDuration = this._getTotalDuration();
     const basePxPerSec = usableW / totalDuration;
     const closestSeparationSec = this._getClosestNoteSeparationSec();
-    const targetGapPx = Math.max(12, Math.min(20, W * 0.018));
+    const targetGapPx = Math.max(12, Math.min(20, viewportW * 0.018));
     const adaptivePxPerSec = targetGapPx / closestSeparationSec;
     const maxAdaptivePxPerSec = basePxPerSec * 1.65;
     const baseSpacingPxPerSec = Math.min(maxAdaptivePxPerSec, Math.max(basePxPerSec, adaptivePxPerSec));
     const pxPerSec = baseSpacingPxPerSec * this.zoomX;
-    const playheadX = left + (usableW * 0.34);
-    const visiblePastSec = (playheadX - left) / pxPerSec;
-    const visibleFutureSec = ((W - right) - playheadX) / pxPerSec;
 
     const baseLineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
     const lineGap = Math.max(8, Math.min(24, baseLineGap * this.zoomY));
@@ -2264,9 +3368,6 @@ class ScoreEditor {
       totalDuration,
       closestSeparationSec,
       pxPerSec,
-      playheadX,
-      visiblePastSec,
-      visibleFutureSec,
       lineGap,
       staffTop,
       yE4,
@@ -2285,12 +3386,12 @@ class ScoreEditor {
 
   _timeToX(time, layout) {
     const resolvedTime = Math.max(0, Number(time) || 0);
-    return layout.playheadX + (resolvedTime - this.currentTime) * layout.pxPerSec;
+    return layout.left + (resolvedTime * layout.pxPerSec);
   }
 
   _timeAtX(x, layout) {
     const clamped = Math.max(layout.left, Math.min(this.W - layout.right, x));
-    return Math.max(0, this.currentTime + ((clamped - layout.playheadX) / layout.pxPerSec));
+    return Math.max(0, (clamped - layout.left) / layout.pxPerSec);
   }
 
   _midiAtY(y, layout) {
@@ -2310,11 +3411,46 @@ class ScoreEditor {
   }
 
   _emitNotesChange() {
+    this._markFingerSuggestionDirty();
     if (this.onNotesChange) this.onNotesChange(this.notes);
   }
 
-  _emitNotesCommit() {
-    if (this.onEditCommit) this.onEditCommit(this.notes);
+  _emitNotesCommit(action = 'Edit notes') {
+    if (this.onEditCommit) this.onEditCommit(this.notes, { action });
+  }
+
+  _markFingerSuggestionDirty() {
+    this.fingerSuggestionDirty = true;
+    this.nextFingerSuggestionScanAt = 0;
+  }
+
+  _buildFingerSuggestionSignature() {
+    const notes = Array.isArray(this.notes) ? this.notes : [];
+    if (!notes.length) return `0|${this.fingerSuggestionLevel}`;
+    let checksum = 0;
+    for (let i = 0; i < notes.length; i += 1) {
+      const note = notes[i];
+      const midi = clampMidi(note.note);
+      const startBucket = Math.round((Number(note.startTime) || 0) * 100);
+      const durationBucket = Math.round((Number(note.duration) || 0.12) * 100);
+      const fingerOverride = normalizeFingerOverride(note.fingerOverride);
+      checksum = (checksum + ((midi * 31) + (startBucket * 17) + (durationBucket * 13) + (fingerOverride * 19) + (i * 7))) >>> 0;
+    }
+    return `${notes.length}|${this.fingerSuggestionLevel}|${checksum.toString(16)}`;
+  }
+
+  _refreshFingerSuggestionCache(force = false) {
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+      return;
+    }
+    if (!force && !this.fingerSuggestionDirty) return;
+    const suggestion = computeFingerSuggestions(this.notes, this.fingerSuggestionLevel);
+    this.fingerSuggestionMap = suggestion.map;
+    this.fingerSuggestionSignature = '';
+    this.fingerSuggestionDirty = false;
   }
 
   _getActiveNoteIndex() {
@@ -2360,7 +3496,7 @@ class ScoreEditor {
     this.selectedNoteIndex = newIndices.length ? newIndices[newIndices.length - 1] : -1;
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Duplicate notes');
     return true;
   }
 
@@ -2387,7 +3523,7 @@ class ScoreEditor {
     this._setSingleSelection(this.notes.length - 1);
     this.hoverNoteIndex = this.selectedNoteIndex;
     this._emitNotesChange();
-    this._emitNotesCommit();
+    this._emitNotesCommit('Add note');
     playPreviewNote(note.note, 0.5, 0.82).catch(error => console.error('Score preview note error:', error));
     return true;
   }
@@ -2403,13 +3539,44 @@ class ScoreEditor {
     return null;
   }
 
+  _hitFingerBadge(x, y) {
+    if (!this.fingerSuggestionMode) return null;
+    for (let i = this.noteHitboxes.length - 1; i >= 0; i -= 1) {
+      const box = this.noteHitboxes[i];
+      if (!box || !box.fingerBadge) continue;
+      const dx = x - box.fingerBadge.x;
+      const dy = y - box.fingerBadge.y;
+      if ((dx * dx) + (dy * dy) <= (box.fingerBadge.r * box.fingerBadge.r)) return box;
+    }
+    return null;
+  }
+
+  _setFingerOverrideForIndices(indices, nextFinger, action = 'Set manual fingering') {
+    if (!Array.isArray(indices) || !indices.length) return false;
+    const normalized = normalizeFingerOverride(nextFinger);
+    let changed = false;
+    indices.forEach(index => {
+      const note = this.notes[index];
+      if (!note) return;
+      const prev = normalizeFingerOverride(note.fingerOverride);
+      if (prev === normalized) return;
+      if (normalized === 0) delete note.fingerOverride;
+      else note.fingerOverride = normalized;
+      changed = true;
+    });
+    if (!changed) return false;
+    this._emitNotesChange();
+    this._emitNotesCommit(action);
+    return true;
+  }
+
   _setCursor(hit = null) {
     if (this.draggingNote) {
       this.canvas.style.cursor = this.draggingNote.mode === 'duration' ? 'ew-resize' : 'move';
       return;
     }
     if (!hit) {
-      this.canvas.style.cursor = this.editMode && !this.isPlaying ? 'crosshair' : 'default';
+      this.canvas.style.cursor = this.editMode ? 'crosshair' : 'default';
       return;
     }
     this.canvas.style.cursor = hit.mode === 'duration' ? 'ew-resize' : 'move';
@@ -2504,6 +3671,7 @@ class ScoreEditor {
 
   _finishDrag(commit = true) {
     if (!this.draggingNote) return;
+    const dragMode = this.draggingNote.mode;
     const changed = Boolean(this.draggingNote.changed);
     if (!this._isSelected(this.draggingNote.index)) {
       this._setSingleSelection(this.draggingNote.index);
@@ -2512,7 +3680,12 @@ class ScoreEditor {
     }
     this.draggingNote = null;
     this._setCursor(null);
-    if (commit && changed) this._emitNotesCommit();
+    if (commit && changed) {
+      const action = dragMode === 'duration'
+        ? 'Change note duration'
+        : 'Move note pitch and timing';
+      this._emitNotesCommit(action);
+    }
   }
 
   _drawLedgerLines(ctx, x, step, layout) {
@@ -2547,47 +3720,60 @@ class ScoreEditor {
 
   _draw(ctx, W, H) {
     const layout = this._buildLayout(W, H);
+    const readable = this.readableMode;
     this.layout = layout;
     this.noteHitboxes = [];
+    this._refreshFingerSuggestionCache();
 
     ctx.clearRect(0, 0, W, H);
     const bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#070914');
-    bg.addColorStop(1, '#090b18');
+    if (readable) {
+      bg.addColorStop(0, '#070a12');
+      bg.addColorStop(1, '#0a0f18');
+    } else {
+      bg.addColorStop(0, '#070914');
+      bg.addColorStop(1, '#090b18');
+    }
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
-    const staffGlow = ctx.createLinearGradient(0, layout.topY, 0, layout.bottomY);
-    staffGlow.addColorStop(0, 'rgba(59,130,246,0.05)');
-    staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
-    staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
-    ctx.fillStyle = staffGlow;
-    ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
+    if (!readable) {
+      const staffGlow = ctx.createLinearGradient(0, layout.topY, 0, layout.bottomY);
+      staffGlow.addColorStop(0, 'rgba(59,130,246,0.05)');
+      staffGlow.addColorStop(0.5, 'rgba(139,92,246,0.08)');
+      staffGlow.addColorStop(1, 'rgba(59,130,246,0.05)');
+      ctx.fillStyle = staffGlow;
+      ctx.fillRect(layout.left - 8, layout.topY, (W - layout.right) - layout.left + 16, layout.bottomY - layout.topY);
+    }
 
     const totalSec = layout.totalDuration;
-    const visibleStartSec = Math.max(0, this.currentTime - layout.visiblePastSec - 1);
-    const visibleEndSec = Math.min(totalSec, this.currentTime + layout.visibleFutureSec + 1);
+    const scrollLeft = this.scrollHost ? this.scrollHost.scrollLeft : 0;
+    const viewportW = Math.max(240, this.viewportW || W);
+    const visibleStartSec = Math.max(0, ((scrollLeft - layout.left) / layout.pxPerSec) - 1);
+    const visibleEndSec = Math.min(totalSec, (((scrollLeft + viewportW) - layout.left) / layout.pxPerSec) + 1);
     const firstSec = Math.floor(visibleStartSec);
     const lastSec = Math.ceil(visibleEndSec);
     for (let sec = firstSec; sec <= lastSec; sec += 1) {
       const x = this._timeToX(sec, layout);
       const isBar = sec % 4 === 0;
-      ctx.strokeStyle = isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)';
-      ctx.lineWidth = isBar ? 1.2 : 0.8;
+      ctx.strokeStyle = readable
+        ? (isBar ? 'rgba(148,163,184,0.28)' : 'rgba(148,163,184,0.12)')
+        : (isBar ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)');
+      ctx.lineWidth = readable ? (isBar ? 1.1 : 0.7) : (isBar ? 1.2 : 0.8);
       ctx.beginPath();
       ctx.moveTo(x, layout.topY);
       ctx.lineTo(x, layout.bottomY);
       ctx.stroke();
       if (isBar) {
-        ctx.fillStyle = 'rgba(156,163,175,0.45)';
+        ctx.fillStyle = readable ? 'rgba(148,163,184,0.6)' : 'rgba(156,163,175,0.45)';
         ctx.font = '9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.fillText(`${sec}s`, x + 2, layout.topY - 6);
       }
     }
 
     const staffSteps = [...TREBLE_LINE_STEPS, ...BASS_LINE_STEPS];
-    ctx.strokeStyle = 'rgba(229,231,235,0.62)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = readable ? 'rgba(226,232,240,0.72)' : 'rgba(229,231,235,0.62)';
+    ctx.lineWidth = readable ? 1.05 : 1;
     staffSteps.forEach(step => {
       const y = this._stepToY(step, layout);
       ctx.beginPath();
@@ -2598,27 +3784,32 @@ class ScoreEditor {
 
     const bracketTop = this._stepToY(TREBLE_LINE_STEPS[0], layout);
     const bracketBottom = this._stepToY(BASS_LINE_STEPS[BASS_LINE_STEPS.length - 1], layout);
-    ctx.strokeStyle = 'rgba(229,231,235,0.5)';
+    const fixedAnchorX = layout.left + scrollLeft;
+    ctx.strokeStyle = readable ? 'rgba(226,232,240,0.62)' : 'rgba(229,231,235,0.5)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(layout.left - 12, bracketTop);
-    ctx.lineTo(layout.left - 12, bracketBottom);
+    ctx.moveTo(fixedAnchorX - 12, bracketTop);
+    ctx.lineTo(fixedAnchorX - 12, bracketBottom);
     ctx.stroke();
 
     const trebleY = this._stepToY(34, layout);
     const bassY = this._stepToY(22, layout);
-    ctx.fillStyle = 'rgba(221,214,254,0.82)';
+    ctx.fillStyle = readable ? 'rgba(203,213,225,0.9)' : 'rgba(221,214,254,0.82)';
     ctx.font = `${Math.max(34, Math.round(layout.lineGap * 3.8))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
-    ctx.fillText('𝄞', layout.left - 54, trebleY + (layout.lineGap * 1.6));
+    ctx.fillText('𝄞', fixedAnchorX - 54, trebleY + (layout.lineGap * 1.6));
     ctx.font = `${Math.max(28, Math.round(layout.lineGap * 3.0))}px "Noto Music", "Bravura", "Segoe UI Symbol", "Apple Symbols", serif`;
-    ctx.fillText('𝄢', layout.left - 52, bassY + (layout.lineGap * 1.25));
-    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillText('Treble Clef', 10, trebleY - (layout.lineGap * 1.8));
-    ctx.fillText('Bass Clef', 10, bassY - (layout.lineGap * 1.35));
+    ctx.fillText('𝄢', fixedAnchorX - 52, bassY + (layout.lineGap * 1.25));
+    if (!readable) {
+      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillText('Treble Clef', scrollLeft + 10, trebleY - (layout.lineGap * 1.8));
+      ctx.fillText('Bass Clef', scrollLeft + 10, bassY - (layout.lineGap * 1.35));
+    }
 
-    const playheadX = layout.playheadX;
-    ctx.strokeStyle = this.isPlaying ? 'rgba(110,231,183,0.85)' : 'rgba(167,139,250,0.5)';
-    ctx.lineWidth = this.isPlaying ? 1.8 : 1.2;
+    const playheadX = this._timeToX(this.currentTime, layout);
+    ctx.strokeStyle = this.isPlaying
+      ? (readable ? 'rgba(45,212,191,0.92)' : 'rgba(110,231,183,0.85)')
+      : (readable ? 'rgba(148,163,184,0.58)' : 'rgba(167,139,250,0.5)');
+    ctx.lineWidth = this.isPlaying ? 1.8 : (readable ? 1.05 : 1.2);
     ctx.beginPath();
     ctx.moveTo(playheadX, layout.topY - 8);
     ctx.lineTo(playheadX, layout.bottomY + 8);
@@ -2631,17 +3822,26 @@ class ScoreEditor {
       const x = this._timeToX(note.startTime, layout);
       const duration = Math.max(0.03, Number(note.duration) || 0.12);
       const tailX = x + Math.max(layout.noteHeadW * 1.15, duration * layout.pxPerSec);
+      const visibleMinX = scrollLeft - 40;
+      const visibleMaxX = scrollLeft + viewportW + 40;
 
-      if (x > W + 20 || tailX < layout.left - 20 || y < layout.topY - 26 || y > layout.bottomY + 26) return;
+      if (x > visibleMaxX || tailX < visibleMinX || y < layout.topY - 26 || y > layout.bottomY + 26) return;
 
       const selectedByDrag = this.draggingNote && this.draggingNote.index === index;
       const selected = selectedByDrag || this._isSelected(index);
       const hovered = !selectedByDrag && this.hoverNoteIndex === index;
       const isLive = this.isPlaying && this.currentTime >= (Number(note.startTime) || 0) && this.currentTime < ((Number(note.startTime) || 0) + duration);
+      const fingerData = this.fingerSuggestionMode ? this.fingerSuggestionMap.get(index) : null;
 
-      const color = this._noteColor(midi);
-      const accent = selected ? 'rgba(196,181,253,1)' : (hovered ? 'rgba(196,181,253,0.72)' : 'rgba(255,255,255,0.22)');
-      const durStroke = isLive ? 'rgba(110,231,183,0.82)' : (selected || hovered ? 'rgba(196,181,253,0.78)' : 'rgba(255,255,255,0.34)');
+      const color = readable ? 'rgb(186,230,253)' : this._noteColor(midi);
+      const accent = readable
+        ? (selected ? 'rgba(125,211,252,0.96)' : (hovered ? 'rgba(125,211,252,0.75)' : 'rgba(226,232,240,0.2)'))
+        : (selected ? 'rgba(196,181,253,1)' : (hovered ? 'rgba(196,181,253,0.72)' : 'rgba(255,255,255,0.22)'));
+      const durStroke = isLive
+        ? (readable ? 'rgba(45,212,191,0.92)' : 'rgba(110,231,183,0.82)')
+        : (selected || hovered
+          ? (readable ? 'rgba(125,211,252,0.9)' : 'rgba(196,181,253,0.78)')
+          : (readable ? 'rgba(203,213,225,0.46)' : 'rgba(255,255,255,0.34)'));
 
       this._drawLedgerLines(ctx, x, step, layout);
 
@@ -2661,8 +3861,8 @@ class ScoreEditor {
       ctx.translate(x, y);
       ctx.rotate(-0.38);
       ctx.shadowColor = color;
-      ctx.shadowBlur = selected || isLive ? 12 : 5;
-      ctx.fillStyle = isLive ? '#a7f3d0' : color;
+      ctx.shadowBlur = readable ? (selected || isLive ? 4 : 1) : (selected || isLive ? 12 : 5);
+      ctx.fillStyle = isLive ? (readable ? '#5eead4' : '#a7f3d0') : color;
       ctx.beginPath();
       ctx.ellipse(0, 0, layout.noteHeadW * 0.58, layout.noteHeadH * 0.85, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -2673,7 +3873,7 @@ class ScoreEditor {
       ctx.restore();
 
       if (BLACK_S.has(midi % 12)) {
-        ctx.fillStyle = 'rgba(229,231,235,0.82)';
+        ctx.fillStyle = readable ? 'rgba(226,232,240,0.9)' : 'rgba(229,231,235,0.82)';
         ctx.font = `bold ${Math.max(10, Math.round(layout.lineGap * 0.7))}px "Times New Roman", Georgia, serif`;
         ctx.fillText('#', x - layout.noteHeadW - 9, y + 4);
       }
@@ -2682,6 +3882,24 @@ class ScoreEditor {
         ctx.strokeStyle = selected ? 'rgba(196,181,253,0.95)' : 'rgba(196,181,253,0.65)';
         ctx.lineWidth = 1;
         ctx.strokeRect(x - layout.noteHeadW, y - layout.noteHeadH - 3, layout.noteHeadW * 2.25, layout.noteHeadH * 2.25);
+      }
+
+      const fingerBadge = fingerData
+        ? {
+          x: x + (layout.noteHeadW * 1.15),
+          y: y - (layout.noteHeadH * 1.45),
+          r: selected || hovered || isLive ? 9.2 : 8.4,
+        }
+        : null;
+      if (fingerBadge) {
+        _drawFingerBadge(
+          ctx,
+          fingerBadge.x,
+          fingerBadge.y,
+          fingerData.finger,
+          fingerData.hand,
+          selected || hovered || isLive
+        );
       }
 
       this.noteHitboxes.push({
@@ -2695,8 +3913,18 @@ class ScoreEditor {
         handleY: y - 7,
         handleW: 14,
         handleH: 14,
+        fingerBadge,
       });
     });
+
+    if (this.isLassoSelecting && this.lasso) {
+      const rect = this._normalizedRect(this.lasso.startX, this.lasso.startY, this.lasso.endX, this.lasso.endY);
+      ctx.fillStyle = 'rgba(59,130,246,0.12)';
+      ctx.strokeStyle = 'rgba(147,197,253,0.9)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+    }
 
   }
 
@@ -2706,8 +3934,22 @@ class ScoreEditor {
 
     this._h = {
       md: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
+        if (this.fingerSuggestionMode && e.button === 0) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            const current = normalizeFingerOverride(fingerHit.noteRef?.fingerOverride) || 0;
+            const next = e.shiftKey
+              ? (current <= 1 ? 5 : current - 1)
+              : (current >= 5 ? 1 : current + 1);
+            this._setFingerOverrideForIndices([fingerHit.index], next, 'Set manual fingering');
+            this.hoverNoteIndex = fingerHit.index;
+            this._setCursor({ mode: 'note' });
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (hit) {
           if (e.metaKey || e.ctrlKey) {
@@ -2720,6 +3962,10 @@ class ScoreEditor {
           this._startDrag(hit, x, y);
           return;
         }
+        if (e.button === 0) {
+          this._startLasso(x, y, e.metaKey || e.ctrlKey);
+          return;
+        }
         if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
       },
       mm: e => {
@@ -2729,40 +3975,62 @@ class ScoreEditor {
           this._setCursor(this.draggingNote);
           return;
         }
-        const hit = this.editMode && !this.isPlaying ? this._hitNote(x, y) : null;
+        if (this.isLassoSelecting) {
+          this._updateLasso(x, y);
+          this.canvas.style.cursor = 'crosshair';
+          return;
+        }
+        const hit = this.editMode ? this._hitNote(x, y) : null;
         this.hoverNoteIndex = hit ? hit.index : -1;
         this._setCursor(hit);
       },
       mu: () => {
         this._finishDrag(true);
+        this._finishLasso();
       },
       ml: () => {
-        if (this.draggingNote) return;
+        if (this.draggingNote || this.isLassoSelecting) return;
         this.hoverNoteIndex = -1;
         this._setCursor(null);
       },
       wm: e => {
+        if (this.isLassoSelecting) {
+          const { x, y } = xy(e);
+          this._updateLasso(x, y);
+          return;
+        }
         if (!this.draggingNote) return;
         const { x, y } = xy(e);
         this._updateDrag(x, y);
       },
       wu: () => {
         this._finishDrag(true);
+        this._finishLasso();
       },
       wb: () => {
         this._finishDrag(false);
+        this._finishLasso();
         this._setCursor(null);
       },
       db: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
         if (this._hitNote(x, y)) return;
         e.preventDefault();
         this._addNoteAt(x, y);
       },
       cm: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const { x, y } = xy(e);
+        if (this.fingerSuggestionMode) {
+          const fingerHit = this._hitFingerBadge(x, y);
+          if (fingerHit) {
+            e.preventDefault();
+            if (!this._isSelected(fingerHit.index)) this._setSingleSelection(fingerHit.index);
+            this._setFingerOverrideForIndices([fingerHit.index], 0, 'Clear manual fingering');
+            return;
+          }
+        }
         const hit = this._hitNote(x, y);
         if (!hit) return;
         e.preventDefault();
@@ -2770,7 +4038,7 @@ class ScoreEditor {
         this._deleteHoveredOrSelectedNote();
       },
       wk: e => {
-        if (!this.editMode || this.isPlaying) return;
+        if (!this.editMode) return;
         const active = document.activeElement;
         if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
 
@@ -2820,6 +4088,18 @@ class ScoreEditor {
         if (!indices.length) return;
         let changed = false;
 
+        if (this.fingerSuggestionMode && /^[0-5]$/.test(e.key)) {
+          const finger = e.key === '0' ? 0 : Number(e.key);
+          if (this._setFingerOverrideForIndices(
+            indices,
+            finger,
+            finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+          )) {
+            e.preventDefault();
+          }
+          return;
+        }
+
         if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           const step = e.shiftKey ? 12 : 1;
           const delta = e.key === 'ArrowUp' ? step : -step;
@@ -2862,9 +4142,19 @@ class ScoreEditor {
           this.selectedNoteIndex = indices[indices.length - 1];
           this.hoverNoteIndex = this.selectedNoteIndex;
           this._emitNotesChange();
-          this._emitNotesCommit();
+          const action = e.key === 'ArrowUp' || e.key === 'ArrowDown'
+            ? 'Change note pitch'
+            : e.key === 'ArrowRight' || e.key === 'ArrowLeft'
+              ? 'Move note timing'
+              : 'Change note duration';
+          this._emitNotesCommit(action);
           e.preventDefault();
         }
+      },
+      hs: () => {
+        if (!this.scrollHost) return;
+        const maxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+        this.scrollRatio = maxScroll > 0 ? (this.scrollHost.scrollLeft / maxScroll) : 0;
       },
     };
 
@@ -2874,6 +4164,7 @@ class ScoreEditor {
     c.addEventListener('mouseleave', this._h.ml);
     c.addEventListener('dblclick', this._h.db);
     c.addEventListener('contextmenu', this._h.cm);
+    this.scrollHost.addEventListener('scroll', this._h.hs, { passive: true });
     window.addEventListener('mousemove', this._h.wm);
     window.addEventListener('mouseup', this._h.wu);
     window.addEventListener('blur', this._h.wb);
@@ -2883,15 +4174,28 @@ class ScoreEditor {
   _setup() {
     cancelAnimationFrame(this.animId);
     const dpr = window.devicePixelRatio || 1;
-    const W = this.container.clientWidth || 800;
+    const viewportW = this.container.clientWidth || 800;
     const H = this.container.clientHeight || 330;
+    const widthZoom = Math.max(1, this.zoomX);
+    const W = Math.max(viewportW, Math.round(viewportW * widthZoom));
+    this.viewportW = viewportW;
     this.W = W;
     this.H = H;
+
+    this.scrollHost.classList.toggle('scroll-x', W > viewportW + 2);
     this.canvas.width = W * dpr;
     this.canvas.height = H * dpr;
     this.canvas.style.width = `${W}px`;
     this.canvas.style.height = `${H}px`;
-    this.setZoom(this.zoomX, this.zoomY);
+
+    const nextMaxScroll = Math.max(0, W - viewportW);
+    if (nextMaxScroll > 0) {
+      this.scrollHost.scrollLeft = Math.round(nextMaxScroll * this.scrollRatio);
+    } else {
+      this.scrollHost.scrollLeft = 0;
+      this.scrollRatio = 0;
+    }
+
     const ctx = this.canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const loop = () => {
@@ -2902,20 +4206,62 @@ class ScoreEditor {
   }
 
   setTime(t) {
-    this.currentTime = Math.max(0, Number(t) || 0);
+    const next = Math.max(0, Number(t) || 0);
+    if (Math.abs(next - this.currentTime) < 0.0001) return;
+    this.currentTime = next;
   }
 
   setPlaying(playing) {
-    this.isPlaying = Boolean(playing);
+    const next = Boolean(playing);
+    if (next === this.isPlaying) return;
+    this.isPlaying = next;
   }
 
   setZoom(x, y) {
-    this.zoomX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
-    this.zoomY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
-    if (this.canvas) {
-      this.canvas.style.transformOrigin = 'center center';
-      this.canvas.style.transform = 'none';
+    const nextX = Math.max(0.6, Math.min(2.4, Number(x) || 1));
+    const nextY = Math.max(0.6, Math.min(2.4, Number(y) || 1));
+    const changed = Math.abs(nextX - this.zoomX) > 0.0001 || Math.abs(nextY - this.zoomY) > 0.0001;
+    if (!changed) return;
+
+    if (this.scrollHost) {
+      const oldMaxScroll = Math.max(0, this.scrollHost.scrollWidth - this.scrollHost.clientWidth);
+      this.scrollRatio = oldMaxScroll > 0 ? (this.scrollHost.scrollLeft / oldMaxScroll) : 0;
     }
+
+    this.zoomX = nextX;
+    this.zoomY = nextY;
+    if (this.container && this.container.clientWidth > 0 && this.container.clientHeight > 0) {
+      this._setup();
+    }
+  }
+
+  setReadableMode(enabled) {
+    this.readableMode = Boolean(enabled);
+  }
+
+  setFingerSuggestions(enabled, level = this.fingerSuggestionLevel) {
+    const nextMode = Boolean(enabled);
+    const nextLevel = normalizeFingerSuggestionLevel(level);
+    const changed = nextMode !== this.fingerSuggestionMode || nextLevel !== this.fingerSuggestionLevel;
+    if (!changed) return;
+    this.fingerSuggestionMode = nextMode;
+    this.fingerSuggestionLevel = nextLevel;
+    this._markFingerSuggestionDirty();
+    if (!this.fingerSuggestionMode) {
+      this.fingerSuggestionMap.clear();
+      this.fingerSuggestionSignature = '';
+      this.fingerSuggestionDirty = false;
+    }
+  }
+
+  applyFingerOverrideToSelection(finger) {
+    const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
+    if (!indices.length) return false;
+    return this._setFingerOverrideForIndices(
+      indices,
+      finger,
+      finger === 0 ? 'Clear manual fingering' : 'Set manual fingering'
+    );
   }
 
   setEditMode(enabled) {
@@ -2924,6 +4270,7 @@ class ScoreEditor {
     this.editMode = next;
     this.hoverNoteIndex = -1;
     if (!this.editMode) this._finishDrag(false);
+    this._finishLasso();
     this._clearSelection();
     this._setCursor(null);
   }
@@ -2932,6 +4279,7 @@ class ScoreEditor {
     cancelAnimationFrame(this.animId);
     this._ro.disconnect();
     this._finishDrag(false);
+    this._finishLasso();
     const c = this.canvas;
     c.removeEventListener('mousedown', this._h.md);
     c.removeEventListener('mousemove', this._h.mm);
@@ -2939,11 +4287,12 @@ class ScoreEditor {
     c.removeEventListener('mouseleave', this._h.ml);
     c.removeEventListener('dblclick', this._h.db);
     c.removeEventListener('contextmenu', this._h.cm);
+    this.scrollHost.removeEventListener('scroll', this._h.hs);
     window.removeEventListener('mousemove', this._h.wm);
     window.removeEventListener('mouseup', this._h.wu);
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
-    c.remove();
+    this.scrollHost.remove();
   }
 }
 
@@ -3117,6 +4466,7 @@ function _renderEditGuideOverlay(isScoreView) {
       title: 'Multi-select',
       details: [
         '<strong>Cmd/Ctrl + Click:</strong> add or remove notes from selection.',
+        '<strong>Drag on empty editor space:</strong> lasso/box select multiple notes at once.',
         '<strong>Cmd/Ctrl + A:</strong> select all editable notes in the current view.',
         '<strong>Delete / Backspace:</strong> remove every selected note at once.',
         '<strong>Cmd/Ctrl + D and arrows:</strong> duplicate or move the full selection together.',
@@ -3128,6 +4478,17 @@ function _renderEditGuideOverlay(isScoreView) {
         '<strong>X controls:</strong> horizontal zoom out / reset / in.',
         '<strong>Y controls:</strong> vertical zoom out / reset / in.',
         '<strong>Saved per view:</strong> roll uses rollZoomX/rollZoomY and score uses scoreZoomX/scoreZoomY.',
+      ],
+    },
+    {
+      title: 'Finger Labels',
+      details: [
+        '<strong>Finger Labels button:</strong> enables manual finger numbers on editable notes.',
+        '<strong>No automatic suggestion:</strong> fingers appear only when you assign them.',
+        '<strong>Click a finger badge:</strong> cycle manual finger override (1 → 5).',
+        '<strong>Shift + Click badge:</strong> cycle backward (5 → 1).',
+        '<strong>Right click badge:</strong> clear manual override on that note.',
+        '<strong>Keys 1..5:</strong> assign that finger to selected note(s), <strong>0:</strong> clear override.',
       ],
     },
   ];
@@ -3269,12 +4630,62 @@ function _syncGuideOverlay(content) {
   }
 }
 
+function _renderEditHistoryPanel() {
+  const items = _editHistoryEntries.slice(0, 24);
+  return `
+    <div class="w-edit-history-panel">
+      <div class="w-edit-history-head">
+        <p>Edit History</p>
+        <span class="w-edit-history-meta">Undo ${_notesUndoStack.length} · Redo ${_notesRedoStack.length} · Click to restore</span>
+      </div>
+      <div class="w-edit-history-list">
+        ${items.length ? items.map(item => `
+          <button class="w-edit-history-item" type="button" data-history-restore="${item.id}">
+            <div class="w-edit-history-item-head">
+              <span class="w-edit-history-type">${item.type}</span>
+              <span>${item.stamp}</span>
+            </div>
+            <p>${item.action}</p>
+            <span class="w-edit-history-item-sub">${Array.isArray(item.notes) ? item.notes.length : 0} notes</span>
+          </button>
+        `).join('') : '<div class="w-edit-history-empty">No edit actions yet.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function _syncHistoryOverlay(content) {
+  if (!content) return;
+  const wrap = content.querySelector('.w-piano-wrap');
+  const body = content.querySelector('#piano-body');
+  if (!wrap || !body) return;
+
+  const shouldShow = state.noteEditMode && state.stage === 'ready' && state.noteHistoryOpen;
+  const existing = wrap.querySelector('.w-edit-history-panel');
+  if (!shouldShow) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const panelHtml = _renderEditHistoryPanel();
+  if (existing) {
+    existing.outerHTML = panelHtml;
+  } else {
+    body.insertAdjacentHTML('beforebegin', panelHtml);
+  }
+  _bindHistoryOverlayActions(content);
+}
+
 function renderDashboard(content) {
   destroyInstances();
+  _dashboardUiCache = null;
   const aM = state.selectedModel;
   const playbackDuration = getMidiDuration();
   const rollNotes = getNotesForRoll();
   const safeProgress = playbackDuration > 0 ? (state.midiTime / playbackDuration) * 100 : 0;
+  const hasAudioForTranscription = Boolean(state.audioFile || state.audioEntryId);
+  const canConvertNow = hasAudioForTranscription && state.stage !== 'processing' && !state.isRecording;
+  const convertLabel = state.stage === 'ready' ? 'Re-convert to MIDI' : 'Convert to MIDI';
   const canEditNotes = state.noteEditMode && state.stage === 'ready';
   const activeEditorView = canEditNotes ? state.noteEditorView : 'roll';
   const isScoreView = activeEditorView === 'score';
@@ -3301,7 +4712,18 @@ function renderDashboard(content) {
               <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a,.webm" style="display:none;">
             </div>
           </div>
-          ${state.fileName ? `<div class="w-file-badge w-fade-in" style="margin-bottom:12px;">${ICON.checkCircle(11,'#10b981')} <span style="font-size:11px;color:#6ee7b7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.fileName}</span></div>` : ''}
+          ${state.fileName ? `
+            <div class="w-file-badge w-fade-in" style="margin-bottom:12px;justify-content:space-between;">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                ${ICON.checkCircle(11,'#10b981')}
+                <span style="font-size:11px;color:#6ee7b7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.fileName}</span>
+              </div>
+              <button id="clear-audio-btn" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:8px;padding:5px 9px;border:1px solid rgba(239,68,68,0.35);background:rgba(239,68,68,0.14);color:#fecaca;font-size:10px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;">
+                ${ICON.trash(10,'#fecaca')}
+                Clear
+              </button>
+            </div>
+          ` : ''}
           ${state.isRecording ? '<div class="w-waveform" id="wf-wrap"></div>' : ''}
           <div id="ap-wrap"></div>
         </div>
@@ -3341,8 +4763,8 @@ function renderDashboard(content) {
             <p style="font-size:16px;font-weight:700;color:#10b981;">${aM==='transkun'?'97%':'94%'}</p>
             <p style="font-size:10px;color:#6b7280;">Accuracy</p>
           </div>
-          <button id="convert-btn" class="w-convert-btn" ${state.stage!=='loaded'?'disabled':''} style="background:${state.stage==='loaded'?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.04)'};border:${state.stage==='loaded'?'none':'1px solid rgba(255,255,255,0.08)'};color:${state.stage==='loaded'?'white':'#4b5563'};cursor:${state.stage==='loaded'?'pointer':'not-allowed'};opacity:${state.stage==='loaded'?1:0.45};box-shadow:${state.stage==='loaded'?'0 0 25px rgba(139,92,246,0.45)':'none'};">
-            ${ICON.zap(14,state.stage==='loaded'?'white':'#4b5563')} Convert to MIDI
+          <button id="convert-btn" class="w-convert-btn" ${canConvertNow?'':'disabled'} style="background:${canConvertNow?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.04)'};border:${canConvertNow?'none':'1px solid rgba(255,255,255,0.08)'};color:${canConvertNow?'white':'#4b5563'};cursor:${canConvertNow?'pointer':'not-allowed'};opacity:${canConvertNow?1:0.45};box-shadow:${canConvertNow?'0 0 25px rgba(139,92,246,0.45)':'none'};">
+            ${ICON.zap(14,canConvertNow?'white':'#4b5563')} ${convertLabel}
           </button>
           ${state.statusMessage ? `
             <div class="w-file-badge w-fade-in" style="margin-top:12px;background:${state.statusType==='error'?'linear-gradient(135deg,rgba(239,68,68,0.14),rgba(239,68,68,0.08))':'linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.06))'};border:1px solid ${state.statusType==='error'?'rgba(239,68,68,0.35)':'rgba(16,185,129,0.25)'};">
@@ -3355,8 +4777,8 @@ function renderDashboard(content) {
               <span style="font-size:11px;color:#6b7280;" id="proc-pct">${Math.round(state.progress)}%</span>
             </div>
             <div class="w-progress-bar"><div class="w-progress-fill" id="proc-bar" style="width:${state.progress}%"></div></div>
-            <div style="display:flex;gap:6px;margin-top:8px;">
-              ${['Upload','Analysis','MIDI mapping'].map((s,i)=>{const ok=state.progress>=[18,48,76][i];return `<div class="w-step" style="background:${ok?'rgba(16,185,129,0.12)':'rgba(255,255,255,0.04)'};border:1px solid ${ok?'rgba(16,185,129,0.25)':'rgba(255,255,255,0.06)'};" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:${ok?'#10b981':'#374151'};"></div><span style="font-size:9px;color:${ok?'#6ee7b7':'#4b5563'};">${s}</span></div>`}).join('')}
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;width:100%;">
+              ${['Upload','Transcribe','Build MIDI'].map((s,i)=>`<div class="w-step" style="width:100%;justify-content:center;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:#374151;"></div><span style="font-size:9px;color:#4b5563;">${s}</span></div>`).join('')}
             </div>
           </div>
           ${state.stage==='ready'?`<div class="w-file-badge w-fade-in" style="margin-top:12px;">${ICON.checkCircle(13,'#10b981')} <span style="font-size:11px;color:#6ee7b7;">MIDI conversion complete!</span></div>`:''}
@@ -3382,11 +4804,18 @@ function renderDashboard(content) {
               <span style="font-size:10px;color:#6b7280;">${fmtTime(playbackDuration)}</span>
             </div>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.music2(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready'?rollNotes.length:'—'}</p><p style="font-size:9px;color:#4b5563;">Notes</p></div>
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.clock(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready'?fmtTime(playbackDuration):'—'}</p><p style="font-size:9px;color:#4b5563;">Duration</p></div>
-            <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.activity(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.stage==='ready' && state.midiTempo ? `${Math.round(state.midiTempo)} BPM` : '—'}</p><p style="font-size:9px;color:#4b5563;">Tempo</p></div>
-          </div>
+          ${state.stage === 'ready' ? `
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.music2(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${rollNotes.length}</p><p style="font-size:9px;color:#4b5563;">Notes</p></div>
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.clock(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${fmtTime(playbackDuration)}</p><p style="font-size:9px;color:#4b5563;">Duration</p></div>
+              <div class="w-stat-box"><div style="color:#6b7280;margin-bottom:2px;">${ICON.activity(11,'#6b7280')}</div><p style="font-size:12px;color:#e5e7eb;font-weight:600;">${state.midiTempo ? `${Math.round(state.midiTempo)} BPM` : '—'}</p><p style="font-size:9px;color:#4b5563;">Tempo</p></div>
+            </div>
+          ` : `
+            <div class="w-stat-box" style="margin-bottom:12px;">
+              <p style="font-size:12px;color:#9ca3af;font-weight:600;">No MIDI yet</p>
+              <p style="font-size:10px;color:#4b5563;margin-top:3px;">Upload or record audio, then convert.</p>
+            </div>
+          `}
           <button id="export-btn" ${state.stage!=='ready'?'disabled':''} style="width:100%;border-radius:12px;padding:10px;display:flex;align-items:center;justify-content:center;gap:8px;background:${state.stage==='ready'?'rgba(59,130,246,0.12)':'rgba(255,255,255,0.03)'};border:${state.stage==='ready'?'1px solid rgba(59,130,246,0.35)':'1px solid rgba(255,255,255,0.06)'};cursor:${state.stage==='ready'?'pointer':'not-allowed'};opacity:${state.stage==='ready'?1:0.35};transition:all 0.3s;">
             ${ICON.download(13,state.stage==='ready'?'#93c5fd':'#4b5563')} <span style="font-size:12px;color:${state.stage==='ready'?'#93c5fd':'#4b5563'};font-weight:500;">Export .mid file</span>
           </button>
@@ -3415,6 +4844,18 @@ function renderDashboard(content) {
             >
               ${state.noteEditMode ? 'Editing On' : 'Edit Notes'}
             </button>
+            <button
+              id="finger-suggest-toggle"
+              class="w-finger-suggest-btn ${state.fingerSuggestionMode ? 'active' : ''}"
+              ${state.stage!=='ready' ? 'disabled' : ''}
+            >
+              ${state.fingerSuggestionMode ? 'Finger Labels On' : 'Finger Labels'}
+            </button>
+            ${canEditNotes && isScoreView ? `
+              <button class="w-score-readable-btn ${state.scoreReadableMode ? 'active' : ''}" id="score-readable-toggle">
+                Readable Score
+              </button>
+            ` : ''}
             ${canEditNotes ? `
               <button class="w-note-guide-btn ${state.noteGuideOpen ? 'active' : ''}" id="guide-toggle">
                 ${state.noteGuideOpen ? 'Hide Guide' : 'Show Guide'}
@@ -3425,7 +4866,7 @@ function renderDashboard(content) {
                 ? `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`
                 : `${state.noteEditMode && state.stage==='ready'
                   ? `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`
-                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Demo preview'}</span>`}`}
+                  : `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready' ? 'Ready · Press play' : 'Waiting for MIDI'}</span>`}`}
             </div>
           </div>
         </div>
@@ -3433,6 +4874,18 @@ function renderDashboard(content) {
           <div class="w-edit-tools">
             <button class="w-edit-tool-btn" id="edit-undo" ${canUndo ? '' : 'disabled'}>Undo</button>
             <button class="w-edit-tool-btn" id="edit-redo" ${canRedo ? '' : 'disabled'}>Redo</button>
+            <button class="w-edit-tool-btn ${state.noteHistoryOpen ? 'active' : ''}" id="history-toggle">${state.noteHistoryOpen ? 'Hide History' : 'History'}</button>
+            ${state.fingerSuggestionMode ? `
+              <div class="w-finger-quick">
+                <span class="w-edit-zoom-label">Finger</span>
+                <button class="w-edit-tool-btn" data-finger-set="1">1</button>
+                <button class="w-edit-tool-btn" data-finger-set="2">2</button>
+                <button class="w-edit-tool-btn" data-finger-set="3">3</button>
+                <button class="w-edit-tool-btn" data-finger-set="4">4</button>
+                <button class="w-edit-tool-btn" data-finger-set="5">5</button>
+                <button class="w-edit-tool-btn" data-finger-set="0">Clear</button>
+              </div>
+            ` : ''}
             <div class="w-edit-zoom">
               <span class="w-edit-zoom-label">X</span>
               <button class="w-edit-tool-btn" id="zoom-x-out">-</button>
@@ -3448,6 +4901,7 @@ function renderDashboard(content) {
           </div>
         ` : ''}
         ${state.noteEditMode && state.stage === 'ready' && state.noteGuideOpen ? _renderEditGuideOverlay(isScoreView) : ''}
+        ${state.noteEditMode && state.stage === 'ready' && state.noteHistoryOpen ? _renderEditHistoryPanel() : ''}
         <div class="w-piano-body" id="piano-body"></div>
         ${isScoreView ? `
           <div class="w-score-disclaimer">
@@ -3472,9 +4926,13 @@ function renderDashboard(content) {
       onNotesChange: notes => {
         if (state.stage === 'ready') state.midiNotes = notes;
       },
-      onEditCommit: notes => {
-        _applyEditorNotesCommit(content, notes);
+      onEditCommit: (notes, meta = null) => {
+        const action = meta && typeof meta.action === 'string' ? meta.action : 'Edit notes';
+        _applyEditorNotesCommit(content, notes, action);
       },
+      readableMode: state.scoreReadableMode,
+      fingerSuggestionMode: state.fingerSuggestionMode && state.stage === 'ready',
+      fingerSuggestionLevel: state.fingerSuggestionLevel,
     };
 
     if (isScoreView) {
@@ -3482,13 +4940,16 @@ function renderDashboard(content) {
       _scoreEditor.setTime(state.midiTime);
       _scoreEditor.setPlaying(state.midiPlaying);
       _scoreEditor.setZoom(state.scoreZoomX, state.scoreZoomY);
-      _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+      _scoreEditor.setReadableMode(state.scoreReadableMode);
+      _scoreEditor.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
+      _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
     } else {
       _pianoRoll = new PianoRoll(pianoBody, rollNotes, editorOptions);
       _pianoRoll.setTime(state.midiTime);
       _pianoRoll.setPlaying(state.midiPlaying);
       _pianoRoll.setZoom(state.rollZoomX, state.rollZoomY);
-      _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+      _pianoRoll.setFingerSuggestions(state.fingerSuggestionMode && state.stage === 'ready', state.fingerSuggestionLevel);
+      _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
     }
   }
 
@@ -3501,6 +4962,7 @@ function renderDashboard(content) {
   content.querySelector('#rec-btn').addEventListener('click', _handleRecord);
   content.querySelector('#upload-btn').addEventListener('click', () => content.querySelector('#file-input').click());
   content.querySelector('#file-input').addEventListener('change', _handleUpload);
+  content.querySelector('#clear-audio-btn')?.addEventListener('click', () => _clearLoadedAudio(content));
 
   const modelBtn = content.querySelector('#model-btn');
   modelBtn.addEventListener('click', () => {
@@ -3511,9 +4973,14 @@ function renderDashboard(content) {
   });
   content.querySelectorAll('.w-model-opt').forEach(btn => {
     btn.addEventListener('click', () => {
-      state.selectedModel = btn.dataset.model;
-      persistSelectedModel(state.selectedModel);
+      const nextModel = btn.dataset.model;
+      state.selectedModel = nextModel;
+      persistAppSettings();
       state.modelDropdownOpen = false;
+      if (state.stage === 'ready' && (state.audioFile || state.audioEntryId)) {
+        const modelLabel = nextModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+        setStatusMessage(`Model switched to ${modelLabel}. Press Convert to re-transcribe the same audio.`, 'success');
+      }
       renderDashboard(content);
     });
   });
@@ -3550,6 +5017,26 @@ function renderDashboard(content) {
     );
     renderDashboard(content);
   });
+  content.querySelector('#finger-suggest-toggle')?.addEventListener('click', () => {
+    if (state.stage !== 'ready') return;
+    state.fingerSuggestionMode = !state.fingerSuggestionMode;
+    setStatusMessage(
+      state.fingerSuggestionMode
+        ? 'Finger labels enabled. Assign fingers manually to selected notes.'
+        : 'Finger labels disabled.',
+      'success'
+    );
+    renderDashboard(content);
+  });
+  content.querySelectorAll('[data-finger-set]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!state.noteEditMode || !state.fingerSuggestionMode || state.midiPlaying) return;
+      const finger = normalizeFingerOverride(btn.dataset.fingerSet);
+      const editor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
+      if (!editor || typeof editor.applyFingerOverrideToSelection !== 'function') return;
+      editor.applyFingerOverrideToSelection(finger);
+    });
+  });
 
   const updateEditorZoom = (axis, action) => {
     if (state.midiPlaying) return;
@@ -3584,6 +5071,16 @@ function renderDashboard(content) {
     _syncEditToolbar(content);
     _syncGuideOverlay(content);
   });
+  content.querySelector('#history-toggle')?.addEventListener('click', () => {
+    state.noteHistoryOpen = !state.noteHistoryOpen;
+    _syncEditToolbar(content);
+    _syncHistoryOverlay(content);
+  });
+  content.querySelector('#score-readable-toggle')?.addEventListener('click', () => {
+    state.scoreReadableMode = !state.scoreReadableMode;
+    if (_scoreEditor) _scoreEditor.setReadableMode(state.scoreReadableMode);
+    _syncEditToolbar(content);
+  });
   content.querySelector('#zoom-x-in')?.addEventListener('click', () => updateEditorZoom('x', 'in'));
   content.querySelector('#zoom-x-out')?.addEventListener('click', () => updateEditorZoom('x', 'out'));
   content.querySelector('#zoom-x-reset')?.addEventListener('click', () => updateEditorZoom('x', 'reset'));
@@ -3604,34 +5101,64 @@ function renderDashboard(content) {
 }
 
 function _updateSeek(content) {
+  if (
+    !_dashboardUiCache ||
+    _dashboardUiCache.content !== content ||
+    !_dashboardUiCache.seek?.isConnected ||
+    !_dashboardUiCache.cur?.isConnected ||
+    !_dashboardUiCache.ps?.isConnected
+  ) {
+    _dashboardUiCache = {
+      content,
+      seek: content.querySelector('#midi-seek'),
+      cur: content.querySelector('#midi-cur'),
+      ps: content.querySelector('#piano-status'),
+      statusKey: '',
+    };
+  }
+
+  const { seek, cur, ps } = _dashboardUiCache;
   const duration = getMidiDuration();
-  const seek = content.querySelector('#midi-seek'), cur = content.querySelector('#midi-cur');
   if (seek) {
-    seek.max = duration;
+    if (Math.abs((Number(seek.max) || 0) - duration) > 0.0001) seek.max = duration;
     seek.value = state.midiTime;
     const p = duration > 0 ? (state.midiTime / duration) * 100 : 0;
-    seek.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
+    const prevP = Number(seek.dataset.pct || '-1');
+    if (!Number.isFinite(prevP) || Math.abs(prevP - p) >= 0.3 || !state.midiPlaying) {
+      seek.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
+      seek.dataset.pct = p.toFixed(2);
+    }
   }
-  if (cur) cur.textContent = fmtTime(state.midiTime);
-  const ps = content.querySelector('#piano-status');
+  if (cur) {
+    const nextTimeText = fmtTime(state.midiTime);
+    if (cur.textContent !== nextTimeText) cur.textContent = nextTimeText;
+  }
   if (ps) {
-    if (state.midiPlaying) {
-      ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
-    } else if (state.noteEditMode && state.stage === 'ready') {
-      ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
-    } else {
-      ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Demo preview'}</span>`;
+    let statusKey = 'idle';
+    if (state.midiPlaying) statusKey = 'live';
+    else if (state.noteEditMode && state.stage === 'ready') statusKey = 'edit';
+    else if (state.stage !== 'ready') statusKey = 'waiting';
+
+    if (_dashboardUiCache.statusKey !== statusKey) {
+      _dashboardUiCache.statusKey = statusKey;
+      if (statusKey === 'live') {
+        ps.innerHTML = `<div class="w-live-badge"><div class="w-live-dot"></div><span style="font-size:10px;color:#6ee7b7;">LIVE</span></div>`;
+      } else if (statusKey === 'edit') {
+        ps.innerHTML = `<div class="w-edit-pill"><div class="w-edit-pill-dot"></div><span style="font-size:10px;color:#ddd6fe;font-weight:600;">Edit Mode Active</span></div>`;
+      } else {
+        ps.innerHTML = `<span style="font-size:10px;color:#4b5563;">${state.stage==='ready'?'Ready · Press play':'Waiting for MIDI'}</span>`;
+      }
     }
   }
   if (_pianoRoll) {
     _pianoRoll.setTime(state.midiTime);
     _pianoRoll.setPlaying(state.midiPlaying);
-    _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+    _pianoRoll.setEditMode(state.noteEditMode && state.stage === 'ready');
   }
   if (_scoreEditor) {
     _scoreEditor.setTime(state.midiTime);
     _scoreEditor.setPlaying(state.midiPlaying);
-    _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready' && !state.midiPlaying);
+    _scoreEditor.setEditMode(state.noteEditMode && state.stage === 'ready');
   }
 }
 
@@ -3665,7 +5192,7 @@ function _handleTransportShortcuts(e) {
 
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     if (state.stage !== 'ready') return;
-    if (state.noteEditMode && !state.midiPlaying) {
+    if (state.noteEditMode) {
       const activeEditor = state.noteEditorView === 'score' ? _scoreEditor : _pianoRoll;
       const hasSelection = activeEditor && typeof activeEditor.getSelectionTimeRange === 'function'
         ? Boolean(activeEditor.getSelectionTimeRange())
@@ -3720,6 +5247,8 @@ async function _midiPlayPause(content) {
       btn.innerHTML = ICON.play(20, 'white');
       btn.style.boxShadow = `0 0 15px rgba(139,92,246,0.4)`;
     }
+    // Keep editors in sync right after pause so notes are editable without nudging time.
+    _updateSeek(content);
     _syncEditToolbar(content);
     return;
   }
@@ -3733,7 +5262,7 @@ async function _midiPlayPause(content) {
     return;
   }
 
-  if (!_sf2Synth && !_sf2UnavailableReason) {
+  if (state.preferSf2Playback && !_sf2Synth && !_sf2UnavailableReason) {
     try {
       await ensureSf2SynthReady();
       setStatusMessage('Playback using Full Grand Piano.sf2.', 'success');
@@ -3969,23 +5498,33 @@ function _updateProcessingUI(content) {
   if (label) label.textContent = _getProcessingLabel(progress);
 
   content.querySelectorAll('[data-step]').forEach((el, i) => {
-    const thresholds = [18, 48, 76];
-    const ok = progress >= thresholds[i];
-    el.style.background = ok ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.04)';
-    el.style.border = `1px solid ${ok ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.06)'}`;
+    const start = i === 0 ? 0 : PROCESS_STEP_BOUNDS[i - 1];
+    const end = PROCESS_STEP_BOUNDS[i];
+    const done = progress >= end;
+    const active = !done && progress >= start;
+    el.style.background = done
+      ? 'rgba(16,185,129,0.12)'
+      : active
+        ? 'rgba(139,92,246,0.16)'
+        : 'rgba(255,255,255,0.04)';
+    el.style.border = `1px solid ${done
+      ? 'rgba(16,185,129,0.25)'
+      : active
+        ? 'rgba(139,92,246,0.35)'
+        : 'rgba(255,255,255,0.06)'}`;
     const dot = el.querySelector('div');
     const sp = el.querySelector('span');
-    if (dot) dot.style.background = ok ? '#10b981' : '#374151';
-    if (sp) sp.style.color = ok ? '#6ee7b7' : '#4b5563';
+    if (dot) dot.style.background = done ? '#10b981' : active ? '#8b5cf6' : '#374151';
+    if (sp) sp.style.color = done ? '#6ee7b7' : active ? '#ddd6fe' : '#4b5563';
   });
 }
 
 function _getProcessingLabel(progress) {
-  if (progress < 18) return 'Uploading audio...';
-  if (progress < 48) return 'Detecting piano onsets...';
-  if (progress < 76) return 'Analyzing notes and timing...';
-  if (progress < 96) return 'Mapping notes to MIDI...';
-  return 'Finalizing MIDI...';
+  const modelName = state.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  if (progress < PROCESS_STEP_BOUNDS[0]) return 'Uploading and validating audio';
+  if (progress < PROCESS_STEP_BOUNDS[1]) return `${modelName}: transcribing notes and timing`;
+  if (progress < 98) return 'Building MIDI events';
+  return 'Finalizing export';
 }
 
 function _getEstimatedProcessingMs(audioFile) {
@@ -3993,6 +5532,36 @@ function _getEstimatedProcessingMs(audioFile) {
   const modelMultiplier = state.selectedModel === 'onsets_and_frames' ? 1.45 : 1;
   const estimated = 9000 + (sizeMb * 4200 * modelMultiplier);
   return Math.max(14000, Math.min(90000, estimated));
+}
+
+function _clearLoadedAudio(content) {
+  if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+    try { _mediaRecorder.stop(); } catch (_) {}
+  }
+  _stopRecordingWaveform();
+  state.isRecording = false;
+  if (_recTimer) clearTimeout(_recTimer);
+
+  if (_audioUrlRef) {
+    URL.revokeObjectURL(_audioUrlRef);
+    _audioUrlRef = null;
+  }
+
+  resetMidiData();
+  state.audioUrl = null;
+  state.audioFile = null;
+  state.fileName = null;
+  state.audioEntryId = null;
+  state.stage = 'idle';
+  state.modelDropdownOpen = false;
+  clearStatusMessage();
+
+  try {
+    localStorage.removeItem(STORAGE_KEYS.lastAudioId);
+  } catch (_) {}
+
+  setStatusMessage('Audio removed. Upload or record a new file.', 'success');
+  renderDashboard(content);
 }
 
 async function _handleRecord() {
@@ -4037,6 +5606,8 @@ async function _handleRecord() {
         }
 
         const durationMs = Math.max(0, Date.now() - _recordingStartedAt);
+        let loadMessage = `Saved locally: ${recordedFile.name}`;
+        let loadType = 'success';
         try {
           const entry = await saveAudioEntry({
             blob,
@@ -4047,7 +5618,6 @@ async function _handleRecord() {
           localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
           resetMidiData();
           applyAudioEntryToState(entry);
-          clearStatusMessage();
         } catch (error) {
           if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
           _audioUrlRef = URL.createObjectURL(blob);
@@ -4057,10 +5627,18 @@ async function _handleRecord() {
           state.fileName = recordedFile.name;
           state.audioEntryId = null;
           state.stage = 'loaded';
-          setStatusMessage('Recording stored in memory only (browser storage failed).', 'error');
+          loadMessage = 'Recording stored in memory only (browser storage failed).';
+          loadType = 'error';
         }
 
-        renderDashboard(content);
+        if (state.autoConvert) {
+          setStatusMessage(`${loadMessage} Auto-convert started.`, loadType);
+          renderDashboard(content);
+          await _handleConvert(content);
+        } else {
+          setStatusMessage(loadMessage, loadType);
+          renderDashboard(content);
+        }
       };
       _mediaRecorder.start();
       state.isRecording = true;
@@ -4093,6 +5671,8 @@ async function _handleUpload(e) {
   }
 
   resetMidiData();
+  let loadMessage = `Saved locally: ${file.name}`;
+  let loadType = 'success';
   try {
     const entry = await saveAudioEntry({
       blob: file,
@@ -4102,7 +5682,6 @@ async function _handleUpload(e) {
     });
     localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
     applyAudioEntryToState(entry);
-    clearStatusMessage();
   } catch (error) {
     if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
     _audioUrlRef = URL.createObjectURL(file);
@@ -4111,18 +5690,24 @@ async function _handleUpload(e) {
     state.fileName = file.name;
     state.audioEntryId = null;
     state.stage = 'loaded';
-    setStatusMessage('Saved in memory only (browser storage failed).', 'error');
+    loadMessage = 'Saved in memory only (browser storage failed).';
+    loadType = 'error';
   }
   e.target.value = '';
 
   const content = document.getElementById('w-content');
-  renderDashboard(content);
-  setStatusMessage(`Saved locally: ${file.name}`, 'success');
-  renderDashboard(content);
+  if (state.autoConvert) {
+    setStatusMessage(`${loadMessage} Auto-convert started.`, loadType);
+    renderDashboard(content);
+    await _handleConvert(content);
+  } else {
+    setStatusMessage(loadMessage, loadType);
+    renderDashboard(content);
+  }
 }
 
 async function _handleConvert(content) {
-  if (state.stage !== 'loaded') return;
+  if (state.stage === 'processing') return;
   const audioFile = await resolveAudioForTranscription();
   if (!audioFile) {
     setStatusMessage('Select or record an audio file first.', 'error');
@@ -4183,11 +5768,13 @@ async function _handleConvert(content) {
     }
 
     await _applyMidiBlob(midiBlob, 'MIDI conversion complete.');
+    notifyConversionEvent('WidiAI conversion complete', `${audioFile.name || 'Audio file'} was converted to MIDI.`);
     renderDashboard(content);
   } catch (error) {
     state.stage = 'loaded';
     state.progress = 0;
     setStatusMessage(`Conversion error: ${error.message}`, 'error');
+    notifyConversionEvent('WidiAI conversion failed', String(error.message || 'Unknown conversion error.'));
     renderDashboard(content);
   } finally {
     if (_progressTimer) {
@@ -4291,113 +5878,200 @@ function renderSettings(content) {
   destroyInstances();
   const s = state;
 
-  const tgl = (id, val) => `<button class="w-toggle" data-tgl="${id}" style="background:${val?'linear-gradient(135deg,#3b82f6,#8b5cf6)':'rgba(255,255,255,0.1)'};border:${val?'none':'1px solid rgba(255,255,255,0.15)'};box-shadow:${val?'0 0 10px rgba(139,92,246,0.4)':'none'};"><div class="w-toggle-thumb" style="left:${val?'20px':'2px'};"></div></button>`;
-  const sel = (id, val, opts) => `<select class="w-select" data-sel="${id}">${opts.map(o=>`<option${o===val?' selected':''}>${o}</option>`).join('')}</select>`;
+  const tgl = (id, val) => `<button class="w-toggle" data-setting-toggle="${id}" style="background:${val ? 'linear-gradient(135deg,#3b82f6,#8b5cf6)' : 'rgba(255,255,255,0.1)'};border:${val ? 'none' : '1px solid rgba(255,255,255,0.15)'};box-shadow:${val ? '0 0 10px rgba(139,92,246,0.4)' : 'none'};"><div class="w-toggle-thumb" style="left:${val ? '20px' : '2px'};"></div></button>`;
   const vp = ((s.velocitySensitivity) / 127) * 100;
+  const activeModelLabel = s.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  const apiHint = `${normalizeApiUrl(s.apiUrl)}/transcribe`;
 
   content.innerHTML = `
     <div class="w-settings">
       <div class="w-settings-inner">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-          <div><h1 style="font-size:20px;font-weight:700;color:#f0f0f8;line-height:1;">Settings</h1><p style="font-size:12px;color:#6b7280;margin-top:4px;">Configure audio, model, and export preferences</p></div>
-          <div style="display:flex;gap:8px;">
-            <button id="reset-btn" style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);cursor:pointer;font-size:12px;color:#9ca3af;">${ICON.rotateCcw(13,'#9ca3af')} Reset to defaults</button>
-            <button id="save-btn" style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:12px;background:${s.settingsSaved?'rgba(16,185,129,0.2)':'linear-gradient(135deg,#3b82f6,#8b5cf6)'};border:${s.settingsSaved?'1px solid rgba(16,185,129,0.35)':'none'};cursor:pointer;font-size:12px;color:${s.settingsSaved?'#6ee7b7':'white'};font-weight:600;box-shadow:${s.settingsSaved?'none':'0 0 16px rgba(139,92,246,0.4)'};">${s.settingsSaved?ICON.checkCircle(13,'#6ee7b7'):ICON.sliders(13,'white')} ${s.settingsSaved?'Saved!':'Save Changes'}</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;">
+          <div>
+            <h1 style="font-size:20px;font-weight:700;color:#f0f0f8;line-height:1;">Settings</h1>
+            <p style="font-size:12px;color:#6b7280;margin-top:4px;">Basic controls that are directly connected to conversion and playback.</p>
+            <p style="font-size:11px;color:#4b5563;margin-top:4px;">Changes are saved automatically.</p>
           </div>
+          <button id="settings-reset" style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);cursor:pointer;font-size:12px;color:#9ca3af;">
+            ${ICON.rotateCcw(13,'#9ca3af')} Reset Defaults
+          </button>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.mic(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Audio Input</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Input Device</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Select your recording microphone or audio interface</p></div>${sel('inputDevice',s.inputDevice,['Default Microphone','Built-in Microphone','USB Audio Interface','Line In'])}</div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.cpu(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Transcription</span></div>
+          <div class="w-setting-row" style="align-items:flex-start;">
+            <div style="min-width:0;">
+              <p style="font-size:12px;color:#d1d5db;font-weight:500;">Backend API URL</p>
+              <p style="font-size:11px;color:#4b5563;margin-top:2px;">Used for conversion requests.</p>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;min-width:min(420px,100%);">
+              <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+                <input id="settings-api-url" type="text" value="${normalizeApiUrl(s.apiUrl)}" style="width:min(360px,55vw);padding:8px 10px;border-radius:10px;background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.12);color:#d1d5db;font-size:12px;outline:none;">
+                <button id="settings-api-save" style="padding:8px 12px;border-radius:10px;background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.32);color:#93c5fd;font-size:11px;font-weight:600;cursor:pointer;">Save</button>
+                <button id="settings-api-test" style="padding:8px 12px;border-radius:10px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#d1d5db;font-size:11px;font-weight:600;cursor:pointer;">Test</button>
+              </div>
+              <p id="settings-api-status" style="font-size:11px;color:#4b5563;max-width:420px;text-align:right;">Current endpoint: ${apiHint}</p>
+            </div>
+          </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Sample Rate</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Higher rates capture more audio detail</p></div>${sel('sampleRate',s.sampleRate,['22050 Hz','44100 Hz','48000 Hz','96000 Hz'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Bit Depth</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Audio resolution per sample</p></div>${sel('bitDepth',s.bitDepth,['16-bit','24-bit','32-bit float'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Noise Reduction</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Automatically filter background noise</p></div>${tgl('noiseReduction',s.noiseReduction)}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-trim Silence</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Remove leading and trailing silence</p></div>${tgl('silenceTrim',s.silenceTrim)}</div>
-        </div>
-
-        <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.cpu(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">AI Model Preferences</span></div>
           <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Model</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model used for new conversion sessions</p></div>
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Model</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Active model for new conversions.</p></div>
             <div style="display:flex;gap:8px;">
-              <button class="w-model-pill" data-pill="TransKun" style="${s.defaultModel==='TransKun'?'background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.4);color:#c4b5fd;':''}">${ICON.cpu(13,s.defaultModel==='TransKun'?'#a78bfa':'#6b7280')} TransKun ${s.defaultModel==='TransKun'?ICON.checkCircle(11,'#a78bfa'):''}</button>
-              <button class="w-model-pill" data-pill="Onsets & Frames" style="${s.defaultModel==='Onsets & Frames'?'background:rgba(59,130,246,0.15);border-color:rgba(59,130,246,0.35);color:#93c5fd;':''}">${ICON.activity(13,s.defaultModel==='Onsets & Frames'?'#60a5fa':'#6b7280')} Onsets & Frames ${s.defaultModel==='Onsets & Frames'?ICON.checkCircle(11,'#60a5fa'):''}</button>
+              <button class="w-model-pill" data-setting-model="transkun" style="${s.selectedModel === 'transkun' ? 'background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.4);color:#c4b5fd;' : ''}">${ICON.cpu(13, s.selectedModel === 'transkun' ? '#a78bfa' : '#6b7280')} TransKun ${s.selectedModel === 'transkun' ? ICON.checkCircle(11,'#a78bfa') : ''}</button>
+              <button class="w-model-pill" data-setting-model="onsets_and_frames" style="${s.selectedModel === 'onsets_and_frames' ? 'background:rgba(59,130,246,0.18);border-color:rgba(59,130,246,0.35);color:#93c5fd;' : ''}">${ICON.activity(13, s.selectedModel === 'onsets_and_frames' ? '#60a5fa' : '#6b7280')} Onsets & Frames ${s.selectedModel === 'onsets_and_frames' ? ICON.checkCircle(11,'#60a5fa') : ''}</button>
             </div>
           </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Processing Quality</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Higher quality increases accuracy but takes longer</p></div>
-            <div style="display:flex;gap:4px;padding:4px;border-radius:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.08);">
-              ${['Standard','High','Ultra'].map(q=>`<button class="w-quality-tab${s.processingQuality===q?' active':''}" data-q="${q}">${q}</button>`).join('')}
-            </div>
-          </div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert on Upload</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Start conversion immediately after file upload</p></div>${tgl('autoConvert',s.autoConvert)}</div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert After Upload / Recording</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Starts conversion immediately when audio is loaded.</p></div>${tgl('autoConvert', s.autoConvert)}</div>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.music2(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">MIDI Export</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Default Format</p></div>${sel('defaultFormat',s.defaultFormat,['MIDI Type 0','MIDI Type 1','MIDI Type 2'])}</div>
-          <div class="w-divider"></div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.music2(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Playback</span></div>
           <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Velocity Sensitivity</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">How strongly note dynamics are mapped to MIDI velocity</p></div>
-            <div style="display:flex;align-items:center;gap:12px;">
-              <input type="range" class="w-slider" data-sl="velocitySensitivity" min="0" max="127" step="1" value="${s.velocitySensitivity}" style="background:linear-gradient(to right,#8b5cf6 ${vp}%,rgba(255,255,255,0.1) ${vp}%);">
-              <span id="vel-disp" style="font-size:12px;color:#a78bfa;min-width:40px;text-align:right;">${s.velocitySensitivity}</span>
-            </div>
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Use Full Grand Piano.sf2</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">When enabled, playback uses the SF2 soundfont when available.</p></div>
+            ${tgl('preferSf2Playback', s.preferSf2Playback)}
           </div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Quantization</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Snap notes to the nearest beat subdivision</p></div>${sel('quantization',s.quantization,['Off','1/32','1/16','1/8','1/4'])}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Include Sustain Pedal</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Detect and export sustain pedal events (CC64)</p></div>${tgl('includeSustain',s.includeSustain)}</div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Automatic Tempo Detection</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Analyse audio to estimate BPM and set MIDI tempo</p></div>${tgl('tempoDetection',s.tempoDetection)}</div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Playback Dynamics</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Scales note velocity for preview and MIDI playback.</p></div>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <input type="range" class="w-slider" id="settings-velocity" min="0" max="127" step="1" value="${s.velocitySensitivity}" style="background:linear-gradient(to right,#8b5cf6 ${vp}%,rgba(255,255,255,0.1) ${vp}%);">
+              <span id="settings-velocity-disp" style="font-size:12px;color:#a78bfa;min-width:40px;text-align:right;">${s.velocitySensitivity}</span>
+            </div>
+          </div>
         </div>
 
         <div class="w-section-card">
-          <div class="w-section-title"><div class="w-section-icon">${ICON.sliders(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">App Preferences</span></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-save Conversions</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Automatically save completed MIDI files to history</p></div>${tgl('autoSave',s.autoSave)}</div>
+          <div class="w-section-title"><div class="w-section-icon">${ICON.bell(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Notifications</span></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Browser Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Notify when conversion succeeds or fails.</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13, s.notificationsOn ? '#a78bfa' : '#4b5563')}${tgl('notificationsOn', s.notificationsOn)}</div></div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Conversion Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Get notified when processing is complete</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13,s.notificationsOn?'#a78bfa':'#4b5563')}${tgl('notificationsOn',s.notificationsOn)}</div></div>
-          <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Storage Limit</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Maximum space allocated for conversion history</p></div>${sel('storageLimit',s.storageLimit,['1 GB','2 GB','5 GB','10 GB','Unlimited'])}</div>
-        </div>
-
-        <div class="w-section-card" style="background:rgba(255,255,255,0.015);">
-          <div style="display:flex;align-items:start;justify-content:space-between;">
-            <div style="display:flex;align-items:center;gap:12px;">
-              <div style="width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#3b82f6,#8b5cf6);box-shadow:0 0 20px rgba(139,92,246,0.35);">${ICON.waves(20,'white')}</div>
-              <div><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;font-weight:700;color:#f0f0f8;">WidiAI</span><span class="w-beta">BETA</span></div><p style="font-size:11px;color:#6b7280;">Wave MIDI AI · Version 0.9.2</p></div>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:6px;text-align:right;">
-              ${[['gauge','TransKun v2.1'],['activity','Onsets & Frames v1.14'],['hardDrive','Storage: browser IndexedDB'],['shield','Processing runs on backend']].map(([ic,tx])=>`<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;"><span style="color:#4b5563;">${ICON[ic](11,'#4b5563')}</span><span style="font-size:11px;color:#4b5563;">${tx}</span></div>`).join('')}
-            </div>
-          </div>
-          <div class="w-divider"></div>
-          <div style="display:flex;align-items:center;gap:8px;">${ICON.info(12,'#4b5563')}<p style="font-size:11px;color:#4b5563;">WidiAI uses state-of-the-art transformer and frame-based models to convert piano audio to MIDI. Audio is stored in your browser and sent to the backend only when you request transcription.</p></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · SF2: ${s.preferSf2Playback ? 'On' : 'Off'}</p></div></div>
         </div>
       </div>
     </div>`;
 
-  // Bind all settings events
-  content.querySelectorAll('[data-tgl]').forEach(btn => btn.addEventListener('click', () => { s[btn.dataset.tgl] = !s[btn.dataset.tgl]; renderSettings(content); }));
-  content.querySelectorAll('[data-sel]').forEach(sel => sel.addEventListener('change', () => { s[sel.dataset.sel] = sel.value; }));
-  content.querySelectorAll('[data-pill]').forEach(btn => btn.addEventListener('click', () => { s.defaultModel = btn.dataset.pill; renderSettings(content); }));
-  content.querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { s.processingQuality = btn.dataset.q; renderSettings(content); }));
-  content.querySelector('[data-sl]')?.addEventListener('input', e => {
-    s.velocitySensitivity = parseInt(e.target.value);
-    const disp = content.querySelector('#vel-disp'); if (disp) disp.textContent = s.velocitySensitivity;
+  const apiInput = content.querySelector('#settings-api-url');
+  const apiStatus = content.querySelector('#settings-api-status');
+
+  const applyApiUrl = () => {
+    s.apiUrl = normalizeApiUrl(apiInput.value);
+    persistAppSettings();
+    apiInput.value = s.apiUrl;
+    if (apiStatus) apiStatus.textContent = `Current endpoint: ${s.apiUrl}/transcribe`;
+  };
+
+  content.querySelector('#settings-api-save')?.addEventListener('click', applyApiUrl);
+  apiInput?.addEventListener('blur', applyApiUrl);
+  apiInput?.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    applyApiUrl();
+  });
+
+  content.querySelector('#settings-api-test')?.addEventListener('click', async (e) => {
+    applyApiUrl();
+    const button = e.currentTarget;
+    if (button) button.disabled = true;
+    if (apiStatus) apiStatus.textContent = `Testing connection to ${s.apiUrl}...`;
+    try {
+      const response = await fetch(`${s.apiUrl}/`, { method: 'GET' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (apiStatus) apiStatus.textContent = `Connection successful: ${s.apiUrl}`;
+      if (apiStatus) apiStatus.style.color = '#6ee7b7';
+    } catch (error) {
+      if (apiStatus) apiStatus.textContent = `Connection failed: ${error.message}`;
+      if (apiStatus) apiStatus.style.color = '#fca5a5';
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
+  content.querySelectorAll('[data-setting-model]').forEach(btn => btn.addEventListener('click', () => {
+    const nextModel = normalizeModelId(btn.dataset.settingModel);
+    if (!nextModel || nextModel === s.selectedModel) return;
+    s.selectedModel = nextModel;
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelectorAll('[data-setting-toggle]').forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.settingToggle;
+    if (!['autoConvert', 'notificationsOn', 'preferSf2Playback'].includes(key)) return;
+    s[key] = !s[key];
+    if (key === 'preferSf2Playback' && !s.preferSf2Playback) {
+      disposeSf2Synth();
+      _sf2UnavailableReason = '';
+    }
+    if (key === 'preferSf2Playback' && s.preferSf2Playback) {
+      _sf2UnavailableReason = '';
+    }
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelector('#settings-velocity')?.addEventListener('input', e => {
+    s.velocitySensitivity = Math.round(clampSettingNumber(e.target.value, 0, 127, DEFAULT_SETTINGS.velocitySensitivity));
+    const disp = content.querySelector('#settings-velocity-disp');
+    if (disp) disp.textContent = s.velocitySensitivity;
     const p = (s.velocitySensitivity / 127) * 100;
     e.target.style.background = `linear-gradient(to right,#8b5cf6 ${p}%,rgba(255,255,255,0.1) ${p}%)`;
   });
-  content.querySelector('#save-btn').addEventListener('click', () => { s.settingsSaved = true; renderSettings(content); setTimeout(() => { s.settingsSaved = false; renderSettings(content); }, 2500); });
-  content.querySelector('#reset-btn').addEventListener('click', () => {
-    Object.assign(s, { inputDevice: 'Default Microphone', sampleRate: '44100 Hz', bitDepth: '24-bit', noiseReduction: true, silenceTrim: true, defaultModel: 'TransKun', processingQuality: 'High', autoConvert: false, velocitySensitivity: 80, quantization: '1/16', includeSustain: true, defaultFormat: 'MIDI Type 1', tempoDetection: true, autoSave: true, notificationsOn: true, storageLimit: '5 GB' });
+
+  content.querySelector('#settings-velocity')?.addEventListener('change', () => {
+    persistAppSettings();
+  });
+
+  content.querySelector('#settings-reset')?.addEventListener('click', () => {
+    Object.assign(s, {
+      apiUrl: normalizeApiUrl(getDefaultApiUrlValue()),
+      selectedModel: 'transkun',
+      autoConvert: DEFAULT_SETTINGS.autoConvert,
+      velocitySensitivity: DEFAULT_SETTINGS.velocitySensitivity,
+      notificationsOn: DEFAULT_SETTINGS.notificationsOn,
+      preferSf2Playback: DEFAULT_SETTINGS.preferSf2Playback,
+    });
+    _sf2UnavailableReason = '';
+    persistAppSettings();
     renderSettings(content);
+  });
+}
+
+function renderHome(content) {
+  destroyInstances();
+  content.innerHTML = `
+    <section style="flex:1;min-height:calc(100vh - 84px);display:flex;align-items:center;justify-content:center;padding:36px 20px 56px;text-align:center;position:relative;z-index:1;">
+      <div style="width:100%;max-width:960px;margin:0 auto;">
+        <div style="display:inline-block;background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.35);border-radius:24px;padding:8px 18px;margin-bottom:24px;">
+          <span style="color:#c4b5fd;font-size:12px;font-weight:600;letter-spacing:0.08em;">AI-POWERED PIANO TRANSCRIPTION</span>
+        </div>
+        <h1 style="font-size:clamp(48px,8vw,96px);font-weight:700;color:#f0f0f8;margin-bottom:24px;line-height:1.04;letter-spacing:-0.03em;">
+          Convert Piano Audio<br />
+          <span style="background:linear-gradient(135deg,#60a5fa 0%,#c4b5fd 50%,#a78bfa 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">to MIDI Instantly</span>
+        </h1>
+        <p style="font-size:clamp(16px,2.1vw,20px);color:#9ca3af;max-width:760px;margin:0 auto 42px;">
+          Upload your piano recordings or record live. Our AI-powered transcription engine converts your performance into accurate MIDI files in seconds.
+        </p>
+        <div style="display:flex;justify-content:center;margin-bottom:20px;">
+          <button type="button" data-home-launch style="padding:16px 44px;border-radius:16px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:white;border:none;font-weight:700;font-size:clamp(18px,2.1vw,24px);cursor:pointer;box-shadow:0 12px 30px rgba(139,92,246,0.45),0 2px 0 rgba(255,255,255,0.16) inset;">
+            Launch WidiAI
+          </button>
+        </div>
+        <p style="font-size:12px;color:#6b7280;">No registration required • Works locally • Browser-based workflow</p>
+      </div>
+    </section>`;
+
+  const go = (page) => {
+    if (typeof _navigateToPage === 'function') {
+      _navigateToPage(page);
+      return;
+    }
+    state.page = page;
+    _syncNavButtons();
+    renderPage(content);
+  };
+
+  content.querySelectorAll('[data-home-launch]').forEach(btn => {
+    btn.addEventListener('click', () => go('dashboard'));
   });
 }
 
@@ -4405,10 +6079,62 @@ function renderSettings(content) {
 // ROUTER + LAYOUT + INIT
 // ═══════════════════════════════════════════════════════════════════
 
+function _syncNavButtons() {
+  document.querySelectorAll('[data-app-nav]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.appNav === state.page);
+  });
+}
+
+function _renderHeader() {
+  if (!_appHeader) return;
+  const logoHtml = `
+    <button type="button" class="w-logo w-logo-btn" data-header-home aria-label="Go to home">
+      <div class="w-logo-icon">${ICON.waves(18,'white')}</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:8px;line-height:1;">
+          <span class="w-logo-name">WidiAI</span>
+          <span class="w-beta">BETA</span>
+        </div>
+        <p class="w-logo-sub">Wave MIDI AI</p>
+      </div>
+    </button>`;
+
+  if (state.page === 'home') {
+    _appHeader.classList.add('w-header-home');
+    _appHeader.innerHTML = `${logoHtml}`;
+  } else {
+    _appHeader.classList.remove('w-header-home');
+    _appHeader.innerHTML = `
+      ${logoHtml}
+      <nav class="w-nav">
+        <button class="w-nav-btn" data-app-nav="dashboard">Dashboard</button>
+        <button class="w-nav-btn" data-app-nav="history">History</button>
+        <button class="w-nav-btn" data-app-nav="settings">Settings</button>
+      </nav>`;
+    _appHeader.querySelectorAll('[data-app-nav]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (typeof _navigateToPage === 'function') _navigateToPage(btn.dataset.appNav);
+      });
+    });
+  }
+
+  _appHeader.querySelector('[data-header-home]')?.addEventListener('click', () => {
+    if (typeof _navigateToPage === 'function') _navigateToPage('home');
+  });
+
+  _syncNavButtons();
+}
+
 function renderPage(content) {
-  if (state.page === 'dashboard') renderDashboard(content);
-  else if (state.page === 'history') renderHistory(content);
-  else if (state.page === 'settings') renderSettings(content);
+  if (state.page === 'home') {
+    renderHome(content);
+  } else if (state.page === 'dashboard') {
+    renderDashboard(content);
+  } else if (state.page === 'history') {
+    renderHistory(content);
+  } else if (state.page === 'settings') {
+    renderSettings(content);
+  }
 }
 
 export function init(container) {
@@ -4416,7 +6142,7 @@ export function init(container) {
   container.className = 'widi-app';
   bindAudioUnlock();
   bindTransportShortcuts();
-  persistSelectedModel(state.selectedModel);
+  persistAppSettings();
 
   // Background glow orbs
   const orbLayer = document.createElement('div');
@@ -4432,30 +6158,8 @@ export function init(container) {
   // Header
   const header = document.createElement('header');
   header.className = 'w-header';
-  header.innerHTML = `
-    <div class="w-logo">
-      <div class="w-logo-icon">${ICON.waves(18,'white')}</div>
-      <div>
-        <div style="display:flex;align-items:center;gap:8px;line-height:1;">
-          <span class="w-logo-name">WidiAI</span>
-          <span class="w-beta">BETA</span>
-        </div>
-        <p class="w-logo-sub">Wave MIDI AI</p>
-      </div>
-    </div>
-    <nav class="w-nav">
-      <button class="w-nav-btn active" data-nav="dashboard">Dashboard</button>
-      <button class="w-nav-btn" data-nav="history">History</button>
-      <button class="w-nav-btn" data-nav="settings">Settings</button>
-    </nav>`;
-  header.querySelectorAll('[data-nav]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.page = btn.dataset.nav;
-      header.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === state.page));
-      renderPage(content);
-    });
-  });
   container.appendChild(header);
+  _appHeader = header;
 
   // Content
   const wrap = document.createElement('div');
@@ -4466,6 +6170,13 @@ export function init(container) {
   wrap.appendChild(content);
   container.appendChild(wrap);
 
+  const goToPage = page => {
+    state.page = page;
+    _renderHeader();
+    renderPage(content);
+  };
+  _navigateToPage = goToPage;
+  _renderHeader();
   renderPage(content);
   hydrateStoredAudio(content);
 
@@ -4473,6 +6184,9 @@ export function init(container) {
   return () => {
     destroyInstances();
     unbindTransportShortcuts();
+    _navigateToPage = null;
+    _appHeader = null;
+    _dashboardUiCache = null;
     if (_recTimer) clearTimeout(_recTimer);
     if (_progressTimer) clearInterval(_progressTimer);
     if (_audioUrlRef) URL.revokeObjectURL(_audioUrlRef);
