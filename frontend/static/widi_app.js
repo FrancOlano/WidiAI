@@ -7378,9 +7378,19 @@ function renderSettings(content) {
     const button = e.currentTarget;
     if (button) button.disabled = true;
     if (apiStatus) apiStatus.textContent = `Testing connection to ${s.apiUrl}...`;
+    if (apiStatus) apiStatus.style.color = '#4b5563';
     try {
       const response = await fetch(`${s.apiUrl}/`, { method: 'GET' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_) {
+        payload = null;
+      }
+      if (!payload || payload.status !== 'ok') {
+        throw new Error('Unexpected response from healthcheck.');
+      }
       if (apiStatus) apiStatus.textContent = `Connection successful: ${s.apiUrl}`;
       if (apiStatus) apiStatus.style.color = '#6ee7b7';
     } catch (error) {
