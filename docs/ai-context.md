@@ -120,7 +120,7 @@ If not set, defaults to:
 - Workflow: .github/workflows/deploy-pages.yml
 - Builds static dist/ from frontend/static + frontend/templates.
 - Writes dist/static/runtime-config.json with apiBaseUrl.
-- Uses Actions variable WIDI_API_URL (defaults to https://widiai.onrender.com).
+- Uses Actions variable WIDI_API_URL (defaults to http://localhost:8000).
 
 ### Render (Backend)
 - Build step should install system deps (ffmpeg, portaudio, libsndfile).

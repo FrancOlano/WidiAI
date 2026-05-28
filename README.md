@@ -190,7 +190,7 @@ npx serve frontend -l 8001
 If you prefer, generate `frontend/static/env.js` so the API URL is preconfigured:
 
 ```bash
-cp .env.frontend.example .env.frontend
+printf "WIDI_API_URL=http://localhost:8000\n" > .env.frontend
 python scripts/generate_frontend_env.py
 ```
 

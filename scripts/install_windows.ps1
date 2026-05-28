@@ -101,14 +101,7 @@ if (-not $SkipTranskunCheck) {
 }
 
 if ($ShouldGenerateFrontendEnv) {
-    $EnvExample = Join-Path $RepoRoot ".env.frontend.example"
     $EnvFile = Join-Path $RepoRoot ".env.frontend"
-
-    if (-not (Test-Path $EnvFile)) {
-        if (Test-Path $EnvExample) {
-            Copy-Item $EnvExample $EnvFile
-        }
-    }
 
     if ($ApiUrl) {
         Set-Content -Path $EnvFile -Value "WIDI_API_URL=$ApiUrl"

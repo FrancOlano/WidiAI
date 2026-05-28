@@ -132,12 +132,7 @@ if [[ ${GENERATE_FRONTEND_ENV} -eq 1 && ${SKIP_FRONTEND_ENV} -eq 0 ]]; then
 fi
 
 if [[ ${SHOULD_GENERATE_FRONTEND_ENV} -eq 1 ]]; then
-    ENV_EXAMPLE="${REPO_ROOT}/.env.frontend.example"
     ENV_FILE="${REPO_ROOT}/.env.frontend"
-
-    if [[ ! -f "${ENV_FILE}" && -f "${ENV_EXAMPLE}" ]]; then
-        cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-    fi
 
     if [[ -n "${API_URL}" ]]; then
         if [[ -f "${ENV_FILE}" ]]; then
