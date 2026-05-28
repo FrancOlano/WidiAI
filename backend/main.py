@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import Response, FileResponse         
-from fastapi.staticfiles import StaticFiles                  
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -22,21 +20,30 @@ from backend.custom_transcriber import transcribe_with_own_model
 app = FastAPI()
 
 
+def _load_allowed_origins() -> list[str]:
+    raw = os.getenv("WIDI_ALLOWED_ORIGINS", "")
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+    ]
+
+
 
 # Enable CORS for frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_load_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
 @app.get("/")
-async def serve_index():
-    return FileResponse("frontend/templates/index.html")
+async def health_check():
+    return {"status": "ok"}
 
 ALLOWED_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm"}
 MAX_AUDIO_BYTES = 25 * 1024 * 1024

@@ -5,7 +5,6 @@ API_URL="http://localhost:8000"
 VENV_DIR=".venv"
 SKIP_SYSTEM_DEPS=0
 GENERATE_FRONTEND_ENV=0
-SKIP_FRONTEND_ENV=0
 SKIP_TRANSKUN_CHECK=0
 
 while [[ $# -gt 0 ]]; do
@@ -26,16 +25,12 @@ while [[ $# -gt 0 ]]; do
             GENERATE_FRONTEND_ENV=1
             shift
             ;;
-        --skip-frontend-env)
-            SKIP_FRONTEND_ENV=1
-            shift
-            ;;
         --skip-transkun-check)
             SKIP_TRANSKUN_CHECK=1
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--api-url URL] [--venv DIR] [--skip-system-deps] [--generate-frontend-env] [--skip-frontend-env] [--skip-transkun-check]"
+            echo "Usage: $0 [--api-url URL] [--venv DIR] [--skip-system-deps] [--generate-frontend-env] [--skip-transkun-check]"
             exit 0
             ;;
         *)
@@ -52,23 +47,14 @@ log() {
     echo "[WidiAI] $1"
 }
 
-install_system_deps() {
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg portaudio19-dev libsndfile1
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y ffmpeg portaudio-devel libsndfile
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Syu --noconfirm ffmpeg portaudio libsndfile
-    else
-        echo "Unsupported package manager. Install ffmpeg, portaudio, and libsndfile manually."
+if [[ ${SKIP_SYSTEM_DEPS} -eq 0 ]]; then
+    if ! command -v brew >/dev/null 2>&1; then
+        echo "Homebrew not found. Install Homebrew or rerun with --skip-system-deps."
         exit 1
     fi
-}
-
-if [[ ${SKIP_SYSTEM_DEPS} -eq 0 ]]; then
-    log "Installing system dependencies"
-    install_system_deps
+    log "Installing system dependencies via Homebrew"
+    brew update
+    brew install ffmpeg portaudio libsndfile
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -98,7 +84,7 @@ if [[ $PY_MAJOR -eq 3 && $PY_MINOR -ge 13 ]]; then
 fi
 
 if ! python3 -c "import venv" >/dev/null 2>&1; then
-    echo "Python venv module not available. Install python3-venv and rerun."
+    echo "Python venv module not available. Install Python with venv support and rerun."
     exit 1
 fi
 
@@ -126,12 +112,7 @@ if [[ ${SKIP_TRANSKUN_CHECK} -eq 0 ]]; then
     fi
 fi
 
-SHOULD_GENERATE_FRONTEND_ENV=0
-if [[ ${GENERATE_FRONTEND_ENV} -eq 1 && ${SKIP_FRONTEND_ENV} -eq 0 ]]; then
-    SHOULD_GENERATE_FRONTEND_ENV=1
-fi
-
-if [[ ${SHOULD_GENERATE_FRONTEND_ENV} -eq 1 ]]; then
+if [[ ${GENERATE_FRONTEND_ENV} -eq 1 ]]; then
     ENV_EXAMPLE="${REPO_ROOT}/.env.frontend.example"
     ENV_FILE="${REPO_ROOT}/.env.frontend"
 
@@ -140,15 +121,7 @@ if [[ ${SHOULD_GENERATE_FRONTEND_ENV} -eq 1 ]]; then
     fi
 
     if [[ -n "${API_URL}" ]]; then
-        if [[ -f "${ENV_FILE}" ]]; then
-            if grep -q "^WIDI_API_URL=" "${ENV_FILE}"; then
-                sed -i "s|^WIDI_API_URL=.*|WIDI_API_URL=${API_URL}|" "${ENV_FILE}"
-            else
-                echo "WIDI_API_URL=${API_URL}" >> "${ENV_FILE}"
-            fi
-        else
-            echo "WIDI_API_URL=${API_URL}" > "${ENV_FILE}"
-        fi
+        printf "WIDI_API_URL=%s\n" "${API_URL}" > "${ENV_FILE}"
     fi
 
     log "Generating frontend env.js"

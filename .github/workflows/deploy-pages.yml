@@ -24,13 +24,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build static site
+        env:
+          WIDI_API_URL: ${{ vars.WIDI_API_URL }}
         run: |
           rm -rf dist
           mkdir -p dist/static
           cp -R frontend/static/* dist/static/
           cp frontend/templates/index.html dist/index.html
           python - <<'PY'
+          import json
+          import os
           from pathlib import Path
+
+          api_url = os.environ.get("WIDI_API_URL", "https://widiai.onrender.com").strip()
+          api_url = api_url.rstrip("/")
+
+          runtime_config = {
+              "apiBaseUrl": api_url,
+              "mode": "prod",
+          }
+          runtime_path = Path("dist/static/runtime-config.json")
+          runtime_path.write_text(
+              json.dumps(runtime_config, indent=2) + "\n",
+              encoding="utf-8",
+          )
 
           index = Path("dist/index.html")
           html = index.read_text(encoding="utf-8")

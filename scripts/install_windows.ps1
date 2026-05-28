@@ -2,6 +2,7 @@ param(
     [string]$ApiUrl = "http://localhost:8000",
     [string]$VenvDir = ".venv",
     [switch]$SkipSystemDeps,
+    [switch]$GenerateFrontendEnv,
     [switch]$SkipFrontendEnv,
     [switch]$SkipTranskunCheck,
     [string]$PythonExe
@@ -46,16 +47,7 @@ if (-not $PythonCmd) {
 }
 
 if (-not $PythonCmd) {
-    if ($SkipSystemDeps) {
-        throw "Python 3.8+ is required. Install Python or rerun without -SkipSystemDeps."
-    }
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "winget is required to auto-install Python. Install Python 3.8+ manually."
-    }
-    Write-Step "Installing Python 3.11 via winget"
-    winget install --id Python.Python.3.11 -e --silent --accept-package-agreements --accept-source-agreements
-    $PythonCmd = "py"
-    $PythonArgs = @("-3.11")
+    throw "Python 3.8+ is required. Install Python or pass -PythonExe to the installer."
 }
 
 $pythonInfo = Get-PythonInfo -Command $PythonCmd -Args $PythonArgs
@@ -82,6 +74,8 @@ if (-not $SkipSystemDeps) {
     }
 }
 
+$ShouldGenerateFrontendEnv = $GenerateFrontendEnv -and -not $SkipFrontendEnv
+
 $VenvPath = Join-Path $RepoRoot $VenvDir
 if (-not (Test-Path $VenvPath)) {
     Write-Step "Creating virtual environment at $VenvPath"
@@ -106,7 +100,7 @@ if (-not $SkipTranskunCheck) {
     }
 }
 
-if (-not $SkipFrontendEnv) {
+if ($ShouldGenerateFrontendEnv) {
     $EnvExample = Join-Path $RepoRoot ".env.frontend.example"
     $EnvFile = Join-Path $RepoRoot ".env.frontend"
 

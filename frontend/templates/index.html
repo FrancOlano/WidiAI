@@ -9,10 +9,35 @@
 <body style="margin:0;min-height:100vh;background:#07070f;">
     <div id="app" style="width:100%;min-height:100vh;"></div>
 
-    <script src="/static/env.js"></script>
+    <script>
+        window.__WIDI_RUNTIME__ = window.__WIDI_RUNTIME__ || {};
+        window.__WIDI_RUNTIME_READY__ = (async () => {
+            try {
+                const response = await fetch("../static/runtime-config.json", { cache: "no-store" });
+                if (!response.ok) return;
+                const data = await response.json();
+                if (data && typeof data.apiBaseUrl === "string") {
+                    window.__WIDI_RUNTIME__.apiBaseUrl = data.apiBaseUrl.trim();
+                }
+                if (data && typeof data.mode === "string") {
+                    window.__WIDI_RUNTIME__.mode = data.mode.trim();
+                }
+            } catch (_) {
+                // Ignore missing or invalid runtime config.
+            }
+        })();
+    </script>
+    <script src="../static/env.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
     <script type="module">
         import { init } from "../static/widi_app.js";
+
+        const runtimeReady = window.__WIDI_RUNTIME_READY__;
+        if (runtimeReady && typeof runtimeReady.then === "function") {
+            try {
+                await runtimeReady;
+            } catch (_) {}
+        }
 
         const root = document.getElementById("app");
         if (root) {
