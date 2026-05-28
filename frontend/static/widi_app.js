@@ -110,8 +110,7 @@ const MODEL_IDS = ['transkun', 'onsets_and_frames'];
 const MAX_RECORDING_MS = 5 * 60 * 1000;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const SF2_SOUND_FONT_CANDIDATES = [
-  '/static/soundfonts/full-grand-piano.sf2',
-  '/static/soundfonts/Full%20Grand%20Piano.sf2',
+  new URL('./soundfonts/full-grand-piano.sf2', import.meta.url).toString(),
 ];
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
@@ -1005,6 +1004,9 @@ function bindAudioUnlock() {
     } catch (_) {
       // Ignore unlock errors here; explicit playback actions will report them.
     }
+    if (state.preferSf2Playback && !_sf2Synth && !_sf2UnavailableReason) {
+      ensureSf2SynthReady().catch(() => {});
+    }
     document.removeEventListener('pointerdown', unlock, true);
     document.removeEventListener('keydown', unlock, true);
   };
@@ -1133,6 +1135,13 @@ async function ensureSf2SynthReady() {
 
 async function playPreviewNote(noteNumber, durationSec = 0.5, velocityNorm = 0.9) {
   await ensureNativeAudioReady();
+  if (state.preferSf2Playback && !_sf2Synth && !_sf2UnavailableReason) {
+    try {
+      await ensureSf2SynthReady();
+    } catch (_) {
+      // Fall back to the built-in synth if the soundfont cannot load.
+    }
+  }
   triggerNativeNote(noteNumber, durationSec, velocityNorm);
 }
 
