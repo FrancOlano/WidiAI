@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+frontend/
+Figma/
+MIDIano/
+node_modules/
+dist/
+uploads/
+recordings/
+midi_outputs/
+*.sf2
+.env*

@@ -157,11 +157,20 @@ const normalizeUiLanguage = (value) => {
   return normalizeI18nLang(value);
 };
 
+const getRuntimeApiUrlValue = () => {
+  const runtime = window.__WIDI_RUNTIME__;
+  if (runtime && typeof runtime.apiBaseUrl === 'string') {
+    return runtime.apiBaseUrl.trim();
+  }
+  return '';
+};
+
 const getDefaultApiUrlValue = () => {
+  const fromRuntime = getRuntimeApiUrlValue();
   const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
     ? window.__WIDI_ENV__.API_URL.trim()
     : '';
-  return fromEnv || window.location.origin;
+  return fromRuntime || fromEnv || window.location.origin;
 };
 
 const normalizeApiUrl = (rawUrl) => {

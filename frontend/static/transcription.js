@@ -17,11 +17,14 @@
         store: 'audio',
     };
     const getApiUrl = () => {
+        const fromRuntime = (window.__WIDI_RUNTIME__ && typeof window.__WIDI_RUNTIME__.apiBaseUrl === 'string')
+            ? window.__WIDI_RUNTIME__.apiBaseUrl.trim()
+            : '';
         const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
             ? window.__WIDI_ENV__.API_URL.trim()
             : '';
         const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
-        const base = state.apiUrl || fromStorage || fromEnv || 'http://localhost:8000';
+        const base = state.apiUrl || fromStorage || fromRuntime || fromEnv || 'http://localhost:8000';
         return base.replace(/\/+$/, '');
     };
     const API_URL = getApiUrl();
