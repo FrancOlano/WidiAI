@@ -170,7 +170,7 @@ const getHostedApiFallback = () => {
     ? window.location.hostname.toLowerCase()
     : '';
   if (host.endsWith('github.io')) {
-    return 'https://widiai.onrender.com';
+    return 'http://localhost:8000';
   }
   return '';
 };

@@ -21,7 +21,7 @@
             ? window.location.hostname.toLowerCase()
             : '';
         const fromHosted = host.endsWith('github.io')
-            ? 'https://widiai.onrender.com'
+            ? 'http://localhost:8000'
             : '';
         const fromRuntime = (window.__WIDI_RUNTIME__ && typeof window.__WIDI_RUNTIME__.apiBaseUrl === 'string')
             ? window.__WIDI_RUNTIME__.apiBaseUrl.trim()
