@@ -17,6 +17,12 @@
         store: 'audio',
     };
     const getApiUrl = () => {
+        const host = (window.location && window.location.hostname)
+            ? window.location.hostname.toLowerCase()
+            : '';
+        const fromHosted = host.endsWith('github.io')
+            ? 'https://widiai.onrender.com'
+            : '';
         const fromRuntime = (window.__WIDI_RUNTIME__ && typeof window.__WIDI_RUNTIME__.apiBaseUrl === 'string')
             ? window.__WIDI_RUNTIME__.apiBaseUrl.trim()
             : '';
@@ -24,7 +30,7 @@
             ? window.__WIDI_ENV__.API_URL.trim()
             : '';
         const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';
-        const base = state.apiUrl || fromStorage || fromRuntime || fromEnv || 'http://localhost:8000';
+        const base = state.apiUrl || fromStorage || fromRuntime || fromEnv || fromHosted || 'http://localhost:8000';
         return base.replace(/\/+$/, '');
     };
     const API_URL = getApiUrl();

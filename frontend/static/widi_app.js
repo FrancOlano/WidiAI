@@ -165,12 +165,23 @@ const getRuntimeApiUrlValue = () => {
   return '';
 };
 
+const getHostedApiFallback = () => {
+  const host = (window.location && window.location.hostname)
+    ? window.location.hostname.toLowerCase()
+    : '';
+  if (host.endsWith('github.io')) {
+    return 'https://widiai.onrender.com';
+  }
+  return '';
+};
+
 const getDefaultApiUrlValue = () => {
   const fromRuntime = getRuntimeApiUrlValue();
   const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
     ? window.__WIDI_ENV__.API_URL.trim()
     : '';
-  return fromRuntime || fromEnv || window.location.origin;
+  const fromHosted = getHostedApiFallback();
+  return fromRuntime || fromEnv || fromHosted || window.location.origin;
 };
 
 const normalizeApiUrl = (rawUrl) => {
