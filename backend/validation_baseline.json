@@ -1,8 +1,0 @@
-{
-  "name": "baseline",
-  "gpu_peak_mb": 0.0,
-  "inference_time_ms": 6337.587833404541,
-  "midi_output_bytes": 76,
-  "midi_notes_count": 3,
-  "timestamp": 1780045475.6838276
-}
