@@ -1,0 +1,8 @@
+{
+  "name": "optimized",
+  "gpu_peak_mb": 0.0,
+  "inference_time_ms": 3278.829336166382,
+  "midi_output_bytes": 76,
+  "midi_notes_count": 3,
+  "timestamp": 1780045636.6514997
+}
