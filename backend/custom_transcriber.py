@@ -396,6 +396,7 @@ def transcribe_with_own_model(
     audio_array: Optional[np.ndarray] = None,
     sample_rate: int = 16000,
     config_override: Optional[dict] = None,
+    audio_format: Optional[str] = None,
 ) -> Path:
     """
     Transcribe audio to MIDI using the onsets and frames model.
@@ -406,6 +407,7 @@ def transcribe_with_own_model(
         audio_array: Pre-loaded audio array (numpy). If provided, audio_path is ignored.
         sample_rate: Sample rate for pre-loaded audio (only used if audio_array provided)
         config_override: Optional config overrides
+        audio_format: Audio format hint (e.g., 'webm', 'mp3') when using audio_array
 
     Returns:
         Path to output MIDI file

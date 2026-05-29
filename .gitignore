@@ -11,5 +11,6 @@ venv
 midi_outputs
 recordings
 uploads
+validation*.json
 
 .env
