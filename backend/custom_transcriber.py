@@ -331,6 +331,7 @@ def get_mel(
     n_mels: int,
     n_fft: int,
     hop_length: int,
+    device: Optional[str] = None,
 ) -> torch.Tensor:
     mel = melspec.compute_mel(
         audio_frame,
@@ -339,9 +340,10 @@ def get_mel(
         hop_length=hop_length,
     )
 
-    device = get_device()
+    if device is None:
+        device = get_device()
 
-    mel = torch.tensor(mel, dtype=torch.float32).to(device)
+    mel = torch.from_numpy(mel).to(dtype=torch.float32, device=device)
     mel = mel.T
 
     return mel.unsqueeze(0)
@@ -389,19 +391,46 @@ def note_extract(
 
 
 def transcribe_with_own_model(
-    audio_path: Union[str, Path],
-    midi_path: Union[str, Path],
+    audio_path: Union[str, Path, None] = None,
+    midi_path: Union[str, Path] = None,
+    audio_array: Optional[np.ndarray] = None,
+    sample_rate: int = 16000,
     config_override: Optional[dict] = None,
+    audio_format: Optional[str] = None,
 ) -> Path:
+    """
+    Transcribe audio to MIDI using the onsets and frames model.
+
+    Args:
+        audio_path: Path to audio file (deprecated if audio_array provided)
+        midi_path: Path where MIDI output will be written
+        audio_array: Pre-loaded audio array (numpy). If provided, audio_path is ignored.
+        sample_rate: Sample rate for pre-loaded audio (only used if audio_array provided)
+        config_override: Optional config overrides
+        audio_format: Audio format hint (e.g., 'webm', 'mp3') when using audio_array
+
+    Returns:
+        Path to output MIDI file
+    """
     config = CONFIG_INFERENCE.copy()
     if config_override:
         config.update(config_override)
 
-    audio_path = Path(audio_path)
+    if midi_path is None:
+        raise ValueError("midi_path is required")
+
     midi_path = Path(midi_path)
     midi_path.parent.mkdir(parents=True, exist_ok=True)
 
-    audio, sample_rate = librosa.load(str(audio_path), sr=config["sample_rate"], mono=True)
+    # Load audio from array or file
+    if audio_array is not None:
+        audio = audio_array
+        # sample_rate parameter is used
+    elif audio_path is not None:
+        audio_path = Path(audio_path)
+        audio, sample_rate = librosa.load(str(audio_path), sr=config["sample_rate"], mono=True)
+    else:
+        raise ValueError("Either audio_path or audio_array must be provided")
 
     melspec = MelSpectrogram(
         sample_rate=sample_rate,
@@ -410,6 +439,7 @@ def transcribe_with_own_model(
     )
 
     model = load_own_model(config)
+    device = next(model.parameters()).device
 
     feature = get_mel(
         audio_frame=audio,
@@ -417,6 +447,7 @@ def transcribe_with_own_model(
         n_mels=config["in_features"],
         n_fft=config["mel_n_fft"],
         hop_length=config["hop_length"],
+        device=str(device),
     )
 
     with torch.inference_mode():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import os
 import shutil
 import subprocess
@@ -10,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import librosa
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -163,13 +166,49 @@ async def transcribe_audio(
 
     try:
         with tempfile.TemporaryDirectory(prefix="widi_") as tmp_dir:
-            input_path = Path(tmp_dir) / f"input{suffix}"
             output_path = Path(tmp_dir) / "output.mid"
-            input_path.write_bytes(audio_bytes)
 
             if selected_model == "onsets_and_frames":
-                await run_in_threadpool(transcribe_with_own_model, input_path, output_path)
+                # Formats that librosa can handle via BytesIO
+                bytesio_safe_formats = {".wav", ".mp3", ".ogg", ".flac"}
+
+                if suffix in bytesio_safe_formats:
+                    # Fast path: load in memory via BytesIO
+                    try:
+                        audio_array, sample_rate = librosa.load(
+                            io.BytesIO(audio_bytes),
+                            sr=16000,
+                            mono=True,
+                        )
+                        await run_in_threadpool(
+                            transcribe_with_own_model,
+                            audio_path=None,
+                            midi_path=output_path,
+                            audio_array=audio_array,
+                            sample_rate=sample_rate,
+                        )
+                    except Exception:
+                        # Fallback to temp file if BytesIO fails
+                        input_path = Path(tmp_dir) / f"input{suffix}"
+                        input_path.write_bytes(audio_bytes)
+                        await run_in_threadpool(
+                            transcribe_with_own_model,
+                            audio_path=input_path,
+                            midi_path=output_path,
+                        )
+                else:
+                    # WebM and other formats requiring ffmpeg: use temp file
+                    input_path = Path(tmp_dir) / f"input{suffix}"
+                    input_path.write_bytes(audio_bytes)
+                    await run_in_threadpool(
+                        transcribe_with_own_model,
+                        audio_path=input_path,
+                        midi_path=output_path,
+                    )
             else:
+                # transkun still needs file path
+                input_path = Path(tmp_dir) / f"input{suffix}"
+                input_path.write_bytes(audio_bytes)
                 await run_in_threadpool(run_transkun, input_path, output_path)
 
             midi_bytes = output_path.read_bytes()
