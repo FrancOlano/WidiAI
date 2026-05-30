@@ -156,6 +156,8 @@ const normalizeUiLanguage = (value) => {
   return normalizeI18nLang(value);
 };
 
+const PROD_API_URL = 'https://widiai-backend.duckdns.org';
+
 const getRuntimeApiUrlValue = () => {
   const runtime = window.__WIDI_RUNTIME__;
   if (runtime && typeof runtime.apiBaseUrl === 'string') {
@@ -7494,7 +7496,7 @@ function renderSettings(content) {
 
   content.querySelector('#settings-reset')?.addEventListener('click', () => {
     Object.assign(s, {
-      apiUrl: normalizeApiUrl(getDefaultApiUrlValue()),
+      apiUrl: normalizeApiUrl(PROD_API_URL),
       selectedModel: 'transkun',
       autoConvert: DEFAULT_SETTINGS.autoConvert,
       velocitySensitivity: DEFAULT_SETTINGS.velocitySensitivity,
@@ -8248,6 +8250,10 @@ function renderPage(content) {
 }
 
 export function init(container) {
+  const hasStoredApiUrl = Boolean(readLocalStorage(STORAGE_KEYS.apiUrl));
+  if (!hasStoredApiUrl) {
+    state.apiUrl = getConfiguredApiUrl();
+  }
   injectCSS(container);
   container.className = 'widi-app';
   bindAudioUnlock();
