@@ -36,7 +36,7 @@ jobs:
           import os
           from pathlib import Path
 
-          api_url = os.environ.get("WIDI_API_URL", "http://localhost:8000").strip()
+          api_url = os.environ.get("WIDI_API_URL", "https://widiai-backend.duckdns.org").strip()
           api_url = api_url.rstrip("/")
 
           runtime_config = {

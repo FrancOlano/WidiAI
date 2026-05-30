@@ -6,6 +6,8 @@ services:
     volumes:
       - ./backend:/app/backend
       - hf_cache:/root/.cache/huggingface
+    environment:
+      WIDI_ALLOWED_ORIGINS: "https://francolano.github.io"
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
