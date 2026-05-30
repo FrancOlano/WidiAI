@@ -17,16 +17,21 @@
         store: 'audio',
     };
     const getApiUrl = () => {
+        const runtime = window.__WIDI_RUNTIME__;
+        const runtimeMode = (runtime && typeof runtime.mode === 'string')
+            ? runtime.mode.trim().toLowerCase()
+            : '';
+        const isProdRuntime = runtimeMode === 'prod';
         const host = (window.location && window.location.hostname)
             ? window.location.hostname.toLowerCase()
             : '';
-        const fromHosted = host.endsWith('github.io')
-            ? 'http://localhost:8000'
+        const fromHosted = (isProdRuntime && host.endsWith('github.io'))
+            ? 'https://widiai-backend.duckdns.org'
             : '';
-        const fromRuntime = (window.__WIDI_RUNTIME__ && typeof window.__WIDI_RUNTIME__.apiBaseUrl === 'string')
-            ? window.__WIDI_RUNTIME__.apiBaseUrl.trim()
+        const fromRuntime = (runtime && typeof runtime.apiBaseUrl === 'string')
+            ? runtime.apiBaseUrl.trim()
             : '';
-        const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
+        const fromEnv = (!isProdRuntime && window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
             ? window.__WIDI_ENV__.API_URL.trim()
             : '';
         const fromStorage = localStorage.getItem(STORAGE_KEYS.apiUrl) || '';

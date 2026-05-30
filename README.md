@@ -226,6 +226,7 @@ For local development, create `.env.frontend` and generate `frontend/static/env.
 
 Notes:
 
+- GitHub Pages builds default to https://widiai-backend.duckdns.org when `WIDI_API_URL` is unset.
 - If `OWN_MODEL_CHECKPOINT` is missing, backend automatically downloads the checkpoint from Hugging Face and reuses the local cache on next runs.
 - `transkun` runs without this variable.
 

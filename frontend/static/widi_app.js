@@ -164,21 +164,38 @@ const getRuntimeApiUrlValue = () => {
   return '';
 };
 
+const getRuntimeMode = () => {
+  const runtime = window.__WIDI_RUNTIME__;
+  if (runtime && typeof runtime.mode === 'string') {
+    return runtime.mode.trim().toLowerCase();
+  }
+  return '';
+};
+
+const isProdRuntime = () => getRuntimeMode() === 'prod';
+
+const getEnvApiUrlValue = () => {
+  if (isProdRuntime()) return '';
+  if (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string') {
+    return window.__WIDI_ENV__.API_URL.trim();
+  }
+  return '';
+};
+
 const getHostedApiFallback = () => {
+  if (!isProdRuntime()) return '';
   const host = (window.location && window.location.hostname)
     ? window.location.hostname.toLowerCase()
     : '';
   if (host.endsWith('github.io')) {
-    return 'http://localhost:8000';
+    return 'https://widiai-backend.duckdns.org';
   }
   return '';
 };
 
 const getDefaultApiUrlValue = () => {
   const fromRuntime = getRuntimeApiUrlValue();
-  const fromEnv = (window.__WIDI_ENV__ && typeof window.__WIDI_ENV__.API_URL === 'string')
-    ? window.__WIDI_ENV__.API_URL.trim()
-    : '';
+  const fromEnv = getEnvApiUrlValue();
   const fromHosted = getHostedApiFallback();
   return fromRuntime || fromEnv || fromHosted || window.location.origin;
 };
