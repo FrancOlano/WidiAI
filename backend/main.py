@@ -56,20 +56,9 @@ def run_transkun(audio_path: Path, output_path: Path) -> None:
     audio_path = str(audio_path)
     output_path = str(output_path)
 
-    # Prefer the transkun binary from the same Python environment as this API.
-    # This avoids picking unrelated global installs (e.g. conda/base).
-    env_transkun = Path(sys.executable).with_name("transkun")
-    transkun_bin = str(env_transkun) if env_transkun.exists() else None
-
-    # Fallback to PATH only if local environment does not provide transkun.
-    if not transkun_bin:
-        transkun_bin = shutil.which("transkun")
-
-    if not transkun_bin:
-        raise RuntimeError(
-            "transkun executable not found in current environment. "
-            "Activate your project venv and run: pip install transkun"
-        )
+    # Use module execution so we don't depend on a wrapper script shebang path.
+    # This is robust even if the project folder has been moved.
+    transkun_cmd = [sys.executable, "-m", "transkun.transcribe", audio_path, output_path]
 
     env = os.environ.copy()
     path_entries = []
@@ -90,12 +79,17 @@ def run_transkun(audio_path: Path, output_path: Path) -> None:
 
     try:
         subprocess.run(
-            [transkun_bin, audio_path, output_path],
+            transkun_cmd,
             check=True,
             capture_output=True,
             text=True,
             env=env,
         )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "transkun module is not available in the current environment. "
+            "Install requirements in this venv: .venv/bin/python -m pip install -r requirements.txt"
+        ) from e
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or e.stdout or ""
         if "No module named 'audioop'" in stderr or "No module named 'pyaudioop'" in stderr:

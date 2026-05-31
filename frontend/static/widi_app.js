@@ -109,17 +109,71 @@ const AUDIO_DB = {
 const MODEL_IDS = ['transkun', 'onsets_and_frames'];
 const MAX_RECORDING_MS = 5 * 60 * 1000;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
-const SF2_SOUND_FONT_CANDIDATES = [
-  new URL('./soundfonts/full-grand-piano.sf2', import.meta.url).toString(),
-];
+const MAX_MIDI_BYTES = 12 * 1024 * 1024;
+const SF2_INSTRUMENT_PRESETS = Object.freeze({
+  grand_piano: Object.freeze({
+    id: 'grand_piano',
+    label: 'Full Grand Piano',
+    candidates: Object.freeze([
+      new URL('./soundfonts/full-grand-piano.sf2', import.meta.url).toString(),
+    ]),
+  }),
+  spanish_guitar: Object.freeze({
+    id: 'spanish_guitar',
+    label: 'Guitarra Clásica Española',
+    candidates: Object.freeze([
+      new URL('./soundfonts/Guitarra-Clasica.sf2', import.meta.url).toString(),
+      new URL('./soundfonts/guitarra-clasica.sf2', import.meta.url).toString(),
+      'https://raw.githubusercontent.com/manolo/sound-fonts/main/Guitarra-Clasica.sf2',
+      'https://github.com/manolo/sound-fonts/raw/main/Guitarra-Clasica.sf2',
+    ]),
+  }),
+});
+const SF2_INSTRUMENT_IDS = Object.freeze(Object.keys(SF2_INSTRUMENT_PRESETS));
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
+const COMPUTER_PIANO_KEY_MAP = Object.freeze({
+  a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71,
+  k: 72, o: 73, l: 74, p: 75, ';': 76, "'": 77,
+  z: 77, x: 78, c: 79, v: 80, b: 81, n: 82, m: 83,
+});
+const COMPUTER_PIANO_KEY_ORDER = Object.freeze(Object.keys(COMPUTER_PIANO_KEY_MAP));
+
+function _formatComputerKeyboardKey(key) {
+  const raw = String(key || '').trim();
+  if (!raw) return '';
+  return raw.length === 1 ? raw.toUpperCase() : raw;
+}
+
+const COMPUTER_PIANO_KEYS_BY_MIDI = (() => {
+  const map = new Map();
+  COMPUTER_PIANO_KEY_ORDER.forEach(key => {
+    const midi = COMPUTER_PIANO_KEY_MAP[key];
+    if (!Number.isFinite(midi)) return;
+    const label = _formatComputerKeyboardKey(key);
+    const current = map.get(midi) || [];
+    if (!current.includes(label)) current.push(label);
+    map.set(midi, current);
+  });
+  return map;
+})();
+
+const COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI = Object.freeze((() => {
+  const out = {};
+  COMPUTER_PIANO_KEYS_BY_MIDI.forEach((labels, midi) => {
+    const preferred = labels.find(label => /^[A-Z]$/.test(label)) || labels[0] || '';
+    out[midi] = preferred;
+  });
+  return out;
+})());
 
 const DEFAULT_SETTINGS = Object.freeze({
   autoConvert: false,
   velocitySensitivity: 80,
   notificationsOn: true,
+  recordingInput: 'mic',
   preferSf2Playback: true,
+  sf2Instrument: 'grand_piano',
   pedalAssist: true,
   pedalAssistAmount: 0.72,
   fingerSuggestionAlgorithm: 'legacy',
@@ -150,6 +204,16 @@ const normalizeFingerSuggestionAlgorithm = (value) => {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'manual') return 'manual';
   return 'legacy';
+};
+
+const normalizeSf2Instrument = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return SF2_INSTRUMENT_IDS.includes(normalized) ? normalized : DEFAULT_SETTINGS.sf2Instrument;
+};
+
+const normalizeRecordingInputMode = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'internal' ? 'internal' : 'mic';
 };
 
 const normalizeUiLanguage = (value) => {
@@ -260,7 +324,9 @@ const getStoredSettings = () => {
       autoConvert: Boolean(parsed.autoConvert),
       velocitySensitivity: Math.round(clampSettingNumber(parsed.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
       notificationsOn: parsed.notificationsOn !== false,
+      recordingInput: normalizeRecordingInputMode(parsed.recordingInput),
       preferSf2Playback: parsed.preferSf2Playback !== false,
+      sf2Instrument: normalizeSf2Instrument(parsed.sf2Instrument),
       pedalAssist: parsed.pedalAssist !== false,
       pedalAssistAmount: clampSettingNumber(parsed.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount),
       fingerSuggestionAlgorithm: normalizeFingerSuggestionAlgorithm(parsed.fingerSuggestionAlgorithm),
@@ -513,6 +579,7 @@ const state = {
   audioEntryId: null,
   midiBlob: null,
   midiUrl: null,
+  midiSourceName: null,
   rawMidiNotes: [],
   rawMidiDuration: 0,
   midiNotes: [],
@@ -520,6 +587,7 @@ const state = {
   midiTempo: null,
   noteEditMode: false,
   noteEditorView: 'roll',
+  keyboardNoteHintsOpen: false,
   noteGuideOpen: storedGuideOpen,
   noteHistoryOpen: false,
   scoreReadableMode: false,
@@ -548,7 +616,9 @@ const state = {
   autoConvert: storedSettings?.autoConvert ?? DEFAULT_SETTINGS.autoConvert,
   velocitySensitivity: storedSettings?.velocitySensitivity ?? DEFAULT_SETTINGS.velocitySensitivity,
   notificationsOn: storedSettings?.notificationsOn ?? DEFAULT_SETTINGS.notificationsOn,
+  recordingInput: storedSettings?.recordingInput || DEFAULT_SETTINGS.recordingInput,
   preferSf2Playback: storedSettings?.preferSf2Playback ?? DEFAULT_SETTINGS.preferSf2Playback,
+  sf2Instrument: storedSettings?.sf2Instrument || DEFAULT_SETTINGS.sf2Instrument,
   pedalAssist: storedSettings?.pedalAssist ?? DEFAULT_SETTINGS.pedalAssist,
   pedalAssistAmount: storedSettings?.pedalAssistAmount ?? DEFAULT_SETTINGS.pedalAssistAmount,
   playbackProfile: storedSettings?.playbackProfile ?? DEFAULT_SETTINGS.playbackProfile,
@@ -559,16 +629,20 @@ const state = {
 let _midiRaf = 0;
 let _recTimer = null, _progressTimer = null, _recordingStartedAt = 0;
 let _mediaRecorder = null, _audioChunks = [];
+let _activeRecordingStream = null, _activeRecordingInputMode = DEFAULT_SETTINGS.recordingInput;
 let _audioUrlRef = null;
 let _pianoRoll = null, _scoreEditor = null, _audioPlayer = null, _waveform = null;
 let _recordWaveCtx = null, _recordWaveAnalyser = null, _recordWaveSource = null, _recordWaveData = null, _recordWaveRaf = 0;
 let _nativeAudioCtx = null, _nativeMasterGain = null;
+let _internalRecordDestination = null;
 let _nativeTimers = [], _nativeNodes = new Set();
 let _nativeStartPerf = 0, _nativeStartOffset = 0;
 let _audioUnlockBound = false;
 let _transportKeysBound = false;
 let _sf2Synth = null, _sf2AudioNode = null;
 let _sf2InitPromise = null, _sf2UnavailableReason = '';
+let _sf2LoadedInstrument = '';
+const _keyboardPianoPressedKeys = new Set();
 let _notesUndoStack = [];
 let _notesRedoStack = [];
 let _lastCommittedNotesSnapshot = null;
@@ -594,6 +668,23 @@ const clearStatusMessage = () => {
   state.statusMessage = '';
   state.statusType = 'info';
 };
+
+function getSf2InstrumentPreset(instrumentId = DEFAULT_SETTINGS.sf2Instrument) {
+  const normalized = normalizeSf2Instrument(instrumentId);
+  return SF2_INSTRUMENT_PRESETS[normalized] || SF2_INSTRUMENT_PRESETS[DEFAULT_SETTINGS.sf2Instrument];
+}
+
+function getMidiSourceNameFallback() {
+  const normalizedModel = normalizeModelId(state.selectedModel) || 'transkun';
+  return `transcription_${normalizedModel}.mid`;
+}
+
+function normalizeMidiFileName(rawName) {
+  const trimmed = String(rawName || '').trim();
+  if (!trimmed) return getMidiSourceNameFallback();
+  if (/\.midi?$/i.test(trimmed)) return trimmed;
+  return `${trimmed}.mid`;
+}
 
 function _buildPedalCompensatedNotes(notes, amount = state.pedalAssistAmount) {
   const source = Array.isArray(notes) ? notes : [];
@@ -673,7 +764,9 @@ const getSettingsSnapshot = () => ({
   autoConvert: Boolean(state.autoConvert),
   velocitySensitivity: Math.round(clampSettingNumber(state.velocitySensitivity, 0, 127, DEFAULT_SETTINGS.velocitySensitivity)),
   notificationsOn: Boolean(state.notificationsOn),
+  recordingInput: normalizeRecordingInputMode(state.recordingInput),
   preferSf2Playback: Boolean(state.preferSf2Playback),
+  sf2Instrument: normalizeSf2Instrument(state.sf2Instrument),
   pedalAssist: Boolean(state.pedalAssist),
   pedalAssistAmount: clampSettingNumber(state.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount),
   fingerSuggestionAlgorithm: normalizeFingerSuggestionAlgorithm(state.fingerSuggestionAlgorithm),
@@ -687,7 +780,9 @@ function persistAppSettings() {
   state.autoConvert = snapshot.autoConvert;
   state.velocitySensitivity = snapshot.velocitySensitivity;
   state.notificationsOn = snapshot.notificationsOn;
+  state.recordingInput = snapshot.recordingInput;
   state.preferSf2Playback = snapshot.preferSf2Playback;
+  state.sf2Instrument = snapshot.sf2Instrument;
   state.pedalAssist = snapshot.pedalAssist;
   state.pedalAssistAmount = snapshot.pedalAssistAmount;
   state.fingerSuggestionAlgorithm = snapshot.fingerSuggestionAlgorithm;
@@ -935,6 +1030,13 @@ function _syncEditToolbar(content) {
     fingerToggle.classList.toggle('active', state.fingerSuggestionMode);
     fingerToggle.textContent = state.fingerSuggestionMode ? _uiText('Finger Labels On') : _uiText('Finger Labels');
   }
+  const keyboardHintsToggle = content.querySelector('#keyboard-note-hints-toggle');
+  if (keyboardHintsToggle) {
+    keyboardHintsToggle.classList.toggle('active', state.keyboardNoteHintsOpen);
+    keyboardHintsToggle.textContent = state.keyboardNoteHintsOpen
+      ? _uiText('Hide Keyboard Notes')
+      : _uiText('Keyboard Notes');
+  }
   const readableToggle = content.querySelector('#score-readable-toggle');
   if (readableToggle) {
     readableToggle.classList.toggle('active', state.scoreReadableMode);
@@ -958,6 +1060,7 @@ function _syncEditToolbar(content) {
   });
 
   if (state.noteHistoryOpen) _syncHistoryOverlay(content);
+  _syncKeyboardNoteHintsPanel(content);
 }
 
 function _syncFingerConfidencePill(content, report = null) {
@@ -978,6 +1081,7 @@ function resetMidiData() {
     state.midiUrl = null;
   }
   state.midiBlob = null;
+  state.midiSourceName = null;
   state.rawMidiNotes = [];
   state.rawMidiDuration = 0;
   state.midiNotes = [];
@@ -986,6 +1090,7 @@ function resetMidiData() {
   state.midiTime = 0;
   state.noteEditMode = false;
   state.noteEditorView = 'roll';
+  state.keyboardNoteHintsOpen = false;
   state.noteHistoryOpen = false;
   state.scoreReadableMode = false;
   state.fingerSuggestionMode = false;
@@ -995,6 +1100,7 @@ function resetMidiData() {
   state.scoreZoomX = 1;
   state.scoreZoomY = 1;
   state.fingerSuggestionReport = null;
+  _keyboardPianoPressedKeys.clear();
   _resetEditHistory();
 }
 
@@ -1010,7 +1116,31 @@ function getNativeAudioContext() {
   _nativeMasterGain = _nativeAudioCtx.createGain();
   _nativeMasterGain.gain.value = 0.8;
   _nativeMasterGain.connect(_nativeAudioCtx.destination);
+  _internalRecordDestination = null;
   return _nativeAudioCtx;
+}
+
+function getInternalRecordingStream() {
+  const ctx = getNativeAudioContext();
+  if (!_nativeMasterGain) {
+    throw new Error('Internal audio bus is unavailable.');
+  }
+  if (!_internalRecordDestination || _internalRecordDestination.context !== ctx) {
+    _internalRecordDestination = ctx.createMediaStreamDestination();
+    _nativeMasterGain.connect(_internalRecordDestination);
+  }
+  if (!_internalRecordDestination.stream) {
+    throw new Error('Internal recording stream is unavailable.');
+  }
+  return _internalRecordDestination.stream;
+}
+
+function inferRecordingFileExtension(blobType = '') {
+  const normalized = String(blobType || '').toLowerCase();
+  if (normalized.includes('ogg')) return 'ogg';
+  if (normalized.includes('wav')) return 'wav';
+  if (normalized.includes('mp4') || normalized.includes('m4a') || normalized.includes('aac')) return 'm4a';
+  return 'webm';
 }
 
 function bindAudioUnlock() {
@@ -1045,6 +1175,7 @@ function disposeSf2Synth() {
   _sf2Synth = null;
   _sf2AudioNode = null;
   _sf2InitPromise = null;
+  _sf2LoadedInstrument = '';
 }
 
 function loadExternalScriptOnce(src) {
@@ -1089,6 +1220,7 @@ async function ensureNativeAudioReady() {
     try { await ctx.close(); } catch (_) {}
     _nativeAudioCtx = null;
     _nativeMasterGain = null;
+    _internalRecordDestination = null;
     ctx = getNativeAudioContext();
     if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
       await ctx.resume();
@@ -1099,6 +1231,11 @@ async function ensureNativeAudioReady() {
 }
 
 async function ensureSf2SynthReady() {
+  const sf2Preset = getSf2InstrumentPreset(state.sf2Instrument);
+  if (_sf2Synth && _sf2LoadedInstrument !== sf2Preset.id) {
+    disposeSf2Synth();
+    _sf2UnavailableReason = '';
+  }
   if (_sf2UnavailableReason) throw new Error(_sf2UnavailableReason);
   if (_sf2Synth) return _sf2Synth;
   if (_sf2InitPromise) return _sf2InitPromise;
@@ -1120,25 +1257,30 @@ async function ensureSf2SynthReady() {
 
     let sf2Buffer = null;
     let sf2LoadedFrom = '';
-    for (let i = 0; i < SF2_SOUND_FONT_CANDIDATES.length; i += 1) {
-      const url = SF2_SOUND_FONT_CANDIDATES[i];
-      const response = await fetch(url);
-      if (!response.ok) continue;
-      sf2Buffer = await response.arrayBuffer();
-      sf2LoadedFrom = url;
-      break;
+    for (let i = 0; i < sf2Preset.candidates.length; i += 1) {
+      const url = sf2Preset.candidates[i];
+      try {
+        const response = await fetch(url);
+        if (!response.ok) continue;
+        sf2Buffer = await response.arrayBuffer();
+        sf2LoadedFrom = url;
+        break;
+      } catch (_) {
+        continue;
+      }
     }
     if (!(sf2Buffer instanceof ArrayBuffer) || sf2Buffer.byteLength === 0) {
-      throw new Error(`Failed to load soundfont (${SF2_SOUND_FONT_CANDIDATES.join(', ')})`);
+      throw new Error(`Failed to load soundfont preset: ${sf2Preset.label}.`);
     }
     await synth.loadSFont(sf2Buffer);
     synth.midiProgramChange(0, 0);
 
     _sf2Synth = synth;
     _sf2AudioNode = node;
+    _sf2LoadedInstrument = sf2Preset.id;
     _sf2UnavailableReason = '';
     try {
-      console.info(`SF2 loaded from: ${sf2LoadedFrom}`);
+      console.info(`SF2 (${sf2Preset.label}) loaded from: ${sf2LoadedFrom}`);
     } catch (_) {}
     return synth;
   })();
@@ -1147,7 +1289,7 @@ async function ensureSf2SynthReady() {
     return await _sf2InitPromise;
   } catch (error) {
     disposeSf2Synth();
-    _sf2UnavailableReason = `SF2 playback unavailable (${error.message}).`;
+    _sf2UnavailableReason = `SF2 playback unavailable (${sf2Preset.label}: ${error.message}).`;
     throw new Error(_sf2UnavailableReason);
   }
 }
@@ -1635,6 +1777,13 @@ function injectCSS(container) {
 .w-edit-history-type{font-size:8px;color:#bfdbfe;text-transform:uppercase;letter-spacing:0.06em;padding:1px 5px;border-radius:999px;border:1px solid rgba(59,130,246,0.35);background:rgba(59,130,246,0.15);}
 .w-edit-history-item-sub{display:block;margin-top:4px;font-size:8px;color:#6b7280;letter-spacing:0.03em;text-transform:uppercase;}
 .w-edit-history-empty{padding:18px 10px 20px;text-align:center;font-size:10px;color:#6b7280;}
+.w-keyboard-hints-panel{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(8,10,20,0.72),rgba(8,8,16,0.68));}
+.w-keyboard-hints-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
+.w-keyboard-hints-title{font-size:10px;color:#bfdbfe;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;}
+.w-keyboard-hints-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;}
+.w-keyboard-hint-chip{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 7px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);}
+.w-keyboard-hint-note{font-size:10px;color:#e5e7eb;font-weight:700;letter-spacing:0.03em;}
+.w-keyboard-hint-keys{font-size:9px;color:#93c5fd;font-weight:700;letter-spacing:0.06em;}
 .w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
 .w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
 
@@ -1777,6 +1926,13 @@ const STEP_E4 = 30;
 
 function clampMidi(midi) {
   return Math.max(MIDI_LO, Math.min(MIDI_HI, Math.round(Number(midi) || MIDI_LO)));
+}
+
+function midiToNoteName(midi) {
+  const normalized = clampMidi(midi);
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const octave = Math.floor(normalized / 12) - 1;
+  return `${noteNames[normalized % 12]}${octave}`;
 }
 
 function midiToDiatonicStep(midi) {
@@ -2653,6 +2809,7 @@ class PianoRoll {
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.showComputerKeyHints = Boolean(options.showComputerKeyHints);
     this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
     this.fingerSuggestionAlgorithm = normalizeFingerSuggestionAlgorithm(options.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = new Map();
@@ -3673,6 +3830,15 @@ class PianoRoll {
         ctx.font='7.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.textAlign='center';ctx.fillText(`C${oct}`,k.x+k.w/2,y+KEY_H-7);
       }
+      if (this.showComputerKeyHints) {
+        const keyHint = COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI[k.midi];
+        if (keyHint) {
+          ctx.fillStyle = act ? 'rgba(255,255,255,0.95)' : 'rgba(55,65,81,0.85)';
+          ctx.font = `${act ? 700 : 600} 8px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.fillText(keyHint, k.x + (k.w / 2), y + KEY_H - 19);
+        }
+      }
     });
 
     this.keys.filter(k=>k.isBlack).forEach(k => {
@@ -3726,6 +3892,15 @@ class PianoRoll {
       ctx.strokeStyle=act?'rgba(139,92,246,0.4)':'rgba(0,0,0,0.4)';
       ctx.lineWidth=act?1:0.6;
       this._rr(ctx,k.x+0.5,y+2,k.w-1,bkh-2,2); ctx.stroke();
+      if (this.showComputerKeyHints) {
+        const keyHint = COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI[k.midi];
+        if (keyHint) {
+          ctx.fillStyle = act ? 'rgba(255,255,255,0.95)' : 'rgba(203,213,225,0.88)';
+          ctx.font = `${act ? 700 : 600} 7px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.fillText(keyHint, k.x + (k.w / 2), y + bkh - 8);
+        }
+      }
     });
 
   }
@@ -3774,6 +3949,9 @@ class PianoRoll {
       this.fingerSuggestionSignature = '';
       this.fingerSuggestionDirty = false;
     }
+  }
+  setComputerKeyHintsVisibility(enabled) {
+    this.showComputerKeyHints = Boolean(enabled);
   }
 
   applyFingerOverrideToSelection(finger) {
@@ -5419,6 +5597,56 @@ function _syncHistoryOverlay(content) {
   applyUiLanguage();
 }
 
+function _renderKeyboardNoteHintsPanel() {
+  const noteHints = [];
+  COMPUTER_PIANO_KEYS_BY_MIDI.forEach((labels, midi) => {
+    noteHints.push({
+      midi: Number(midi),
+      note: midiToNoteName(midi),
+      keys: labels.join(' / '),
+    });
+  });
+  noteHints.sort((a, b) => a.midi - b.midi);
+
+  return `
+    <div class="w-keyboard-hints-panel">
+      <div class="w-keyboard-hints-head">
+        <span class="w-keyboard-hints-title">${_uiText('Computer Keyboard Mapping')}</span>
+      </div>
+      <div class="w-keyboard-hints-grid">
+        ${noteHints.map(item => `
+          <div class="w-keyboard-hint-chip">
+            <span class="w-keyboard-hint-note">${item.note}</span>
+            <span class="w-keyboard-hint-keys">${item.keys}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function _syncKeyboardNoteHintsPanel(content) {
+  if (!content) return;
+  const wrap = content.querySelector('.w-piano-wrap');
+  const body = content.querySelector('#piano-body');
+  if (!wrap || !body) return;
+
+  const shouldShow = state.stage === 'ready' && state.keyboardNoteHintsOpen;
+  const existing = wrap.querySelector('.w-keyboard-hints-panel');
+  if (!shouldShow) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const panelHtml = _renderKeyboardNoteHintsPanel();
+  if (existing) {
+    existing.outerHTML = panelHtml;
+  } else {
+    body.insertAdjacentHTML('beforebegin', panelHtml);
+  }
+  applyUiLanguage();
+}
+
 function renderDashboard(content) {
   destroyInstances();
   _dashboardUiCache = null;
@@ -5426,6 +5654,13 @@ function renderDashboard(content) {
   const playbackDuration = getMidiDuration();
   const rollNotes = getNotesForRoll();
   const safeProgress = playbackDuration > 0 ? (state.midiTime / playbackDuration) * 100 : 0;
+  const recordingInputMode = normalizeRecordingInputMode(state.recordingInput);
+  const canLoadMidiNow = state.stage !== 'processing' && !state.isRecording;
+  const sf2Preset = getSf2InstrumentPreset(state.sf2Instrument);
+  const sf2OptionsHtml = SF2_INSTRUMENT_IDS.map(id => {
+    const preset = getSf2InstrumentPreset(id);
+    return `<option value="${preset.id}" ${preset.id === sf2Preset.id ? 'selected' : ''}>${preset.label}</option>`;
+  }).join('');
   const hasAudioForTranscription = Boolean(state.audioFile || state.audioEntryId);
   const canConvertNow = hasAudioForTranscription && state.stage !== 'processing' && !state.isRecording;
   const convertLabel = state.stage === 'ready' ? 'Re-convert to MIDI' : 'Convert to MIDI';
@@ -5450,14 +5685,19 @@ function renderDashboard(content) {
           <div class="w-panel-header">${ICON.mic(13,'#6b7280')} AUDIO INPUT</div>
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
             <button class="w-rec-btn${state.isRecording?' recording':''}" id="rec-btn" style="position:relative;">
-              <span id="rec-icon">${state.isRecording ? ICON.micOff(22,'white') : ICON.mic(22,'#ef4444')}</span>
+              <span id="rec-icon">${state.isRecording ? ICON.micOff(22,'white') : (recordingInputMode === 'internal' ? ICON.music2(22,'#60a5fa') : ICON.mic(22,'#ef4444'))}</span>
               ${state.isRecording ? '<div class="w-rec-pulse"></div>' : ''}
             </button>
             <div style="flex:1;min-width:0;">
-              <p id="rec-label" style="font-size:11px;color:${state.isRecording?'#ef4444':'#6b7280'};margin-bottom:4px;">${state.isRecording ? '● Recording...' : 'Record piano audio'}</p>
+              <p id="rec-label" style="font-size:11px;color:${state.isRecording?'#ef4444':'#6b7280'};margin-bottom:${state.isRecording ? '4px' : '0'};">${state.isRecording ? _uiText('● Recording...') : ''}</p>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                <span style="font-size:10px;color:#6b7280;">${_uiText('Record Source')}:</span>
+                <button class="w-quality-tab ${recordingInputMode === 'mic' ? 'active' : ''}" data-record-source="mic">${_uiText('Ambient Mic')}</button>
+                <button class="w-quality-tab ${recordingInputMode === 'internal' ? 'active' : ''}" data-record-source="internal">${_uiText('Internal Piano')}</button>
+              </div>
               <button class="w-upload-btn" id="upload-btn">${ICON.upload(12,'#93c5fd')} <span>Upload audio file</span></button>
               <input type="file" id="file-input" accept=".wav,.mp3,.flac,.ogg,.m4a,.webm" style="display:none;">
-              <p style="font-size:10px;color:#4b5563;margin-top:6px;">Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)</p>
+              <p style="font-size:10px;color:#4b5563;margin-top:6px;">${_uiText('Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)')}</p>
             </div>
           </div>
           ${state.fileName ? `
@@ -5541,7 +5781,7 @@ function renderDashboard(content) {
               ${['Upload','Transcribe','Build MIDI'].map((s,i)=>`<div class="w-step" style="width:100%;justify-content:center;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);" data-step="${i}"><div style="width:5px;height:5px;border-radius:50%;background:#374151;"></div><span style="font-size:9px;color:#4b5563;">${s}</span></div>`).join('')}
             </div>
           </div>
-          ${state.stage==='ready'?`<div class="w-file-badge w-fade-in" style="margin-top:12px;">${ICON.checkCircle(13,'#10b981')} <span style="font-size:11px;color:#6ee7b7;">MIDI conversion complete!</span></div>`:''}
+          ${state.stage==='ready'?`<div class="w-file-badge w-fade-in" style="margin-top:12px;">${ICON.checkCircle(13,'#10b981')} <span style="font-size:11px;color:#6ee7b7;">MIDI ready.</span></div>`:''}
         </div>
 
         <!-- MIDI Player -->
@@ -5557,6 +5797,30 @@ function renderDashboard(content) {
               <span style="font-size:11px;color:#9ca3af;">Demo</span>
             </button>
           </div>
+          <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;margin-bottom:10px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <button
+                id="upload-midi-btn"
+                ${canLoadMidiNow ? '' : 'disabled'}
+                style="display:inline-flex;align-items:center;gap:6px;border-radius:10px;padding:7px 10px;border:1px solid rgba(59,130,246,0.35);background:${canLoadMidiNow ? 'rgba(59,130,246,0.12)' : 'rgba(255,255,255,0.03)'};color:${canLoadMidiNow ? '#93c5fd' : '#4b5563'};font-size:11px;font-weight:600;cursor:${canLoadMidiNow ? 'pointer' : 'not-allowed'};opacity:${canLoadMidiNow ? 1 : 0.55};"
+              >
+                ${ICON.upload(11, canLoadMidiNow ? '#93c5fd' : '#4b5563')}
+                <span>Upload MIDI file</span>
+              </button>
+              <input type="file" id="midi-file-input" accept=".mid,.midi,audio/midi,audio/x-midi,application/x-midi" style="display:none;">
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;min-width:min(220px,100%);justify-content:flex-end;">
+              <span style="font-size:10px;color:#6b7280;">Instrument</span>
+              <select id="sf2-instrument-select" class="w-select" style="min-width:190px;max-width:220px;" ${state.preferSf2Playback ? '' : 'disabled'}>
+                ${sf2OptionsHtml}
+              </select>
+            </div>
+          </div>
+          ${state.midiSourceName ? `
+            <p style="font-size:10px;color:#6b7280;margin:0 0 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              MIDI Source: ${state.midiSourceName}
+            </p>
+          ` : ''}
           <div style="margin-bottom:12px;">
             <input type="range" class="w-seek" id="midi-seek" min="0" max="${playbackDuration}" step="0.05" value="${state.midiTime}" ${state.stage!=='ready'?'disabled':''} style="background:linear-gradient(to right,#8b5cf6 ${safeProgress}%,rgba(255,255,255,0.1) ${safeProgress}%);">
             <div style="display:flex;justify-content:space-between;margin-top:4px;">
@@ -5603,6 +5867,13 @@ function renderDashboard(content) {
               ${state.stage!=='ready' ? 'disabled' : ''}
             >
               ${state.noteEditMode ? _uiText('Editing On') : _uiText('Edit Notes')}
+            </button>
+            <button
+              id="keyboard-note-hints-toggle"
+              class="w-note-guide-btn ${state.keyboardNoteHintsOpen ? 'active' : ''}"
+              ${state.stage!=='ready' ? 'disabled' : ''}
+            >
+              ${state.keyboardNoteHintsOpen ? _uiText('Hide Keyboard Notes') : _uiText('Keyboard Notes')}
             </button>
             <button
               id="finger-suggest-toggle"
@@ -5702,6 +5973,7 @@ function renderDashboard(content) {
       fingerSuggestionMode: state.fingerSuggestionMode && state.stage === 'ready',
       fingerSuggestionLevel: state.fingerSuggestionLevel,
       fingerSuggestionAlgorithm: state.fingerSuggestionAlgorithm,
+      showComputerKeyHints: state.keyboardNoteHintsOpen && state.stage === 'ready',
     };
 
     if (isScoreView) {
@@ -5739,6 +6011,22 @@ function renderDashboard(content) {
 
   // Bind events
   content.querySelector('#rec-btn').addEventListener('click', _handleRecord);
+  content.querySelectorAll('[data-record-source]').forEach(button => {
+    button.addEventListener('click', () => {
+      if (state.isRecording) return;
+      const nextMode = normalizeRecordingInputMode(button.dataset.recordSource);
+      if (nextMode === state.recordingInput) return;
+      state.recordingInput = nextMode;
+      persistAppSettings();
+      setStatusMessage(
+        nextMode === 'internal'
+          ? _uiText('Recording source switched to Internal Piano.')
+          : _uiText('Recording source switched to Ambient Mic.'),
+        'success'
+      );
+      renderDashboard(content);
+    });
+  });
   content.querySelector('#upload-btn').addEventListener('click', () => content.querySelector('#file-input').click());
   content.querySelector('#file-input').addEventListener('change', _handleUpload);
   content.querySelector('#clear-audio-btn')?.addEventListener('click', () => _clearLoadedAudio(content));
@@ -5773,6 +6061,12 @@ function renderDashboard(content) {
       audioDropPanel.classList.remove('drag-active');
       const droppedFile = e.dataTransfer?.files?.[0];
       if (!droppedFile) return;
+      const isMidiDrop = /\.midi?$/i.test(droppedFile.name || '') || /midi/i.test(droppedFile.type || '');
+      if (isMidiDrop) {
+        setStatusMessage(_uiText('Use the MIDI Player upload button for .mid/.midi files.'), 'error');
+        renderDashboard(content);
+        return;
+      }
       await _loadAudioFileFromUserInput(droppedFile, content);
     };
     audioDropPanel.addEventListener('dragenter', enter);
@@ -5810,6 +6104,28 @@ function renderDashboard(content) {
   content.querySelector('#midi-play').addEventListener('click', () => _midiPlayPause(content));
   content.querySelector('#midi-stop').addEventListener('click', () => _midiStop(content));
   content.querySelector('#demo-midi-btn').addEventListener('click', () => _loadDemoMidi(content));
+  content.querySelector('#upload-midi-btn')?.addEventListener('click', () => {
+    if (!canLoadMidiNow) return;
+    content.querySelector('#midi-file-input')?.click();
+  });
+  content.querySelector('#midi-file-input')?.addEventListener('change', _handleMidiUpload);
+  content.querySelector('#sf2-instrument-select')?.addEventListener('change', async e => {
+    const nextInstrument = normalizeSf2Instrument(e.target?.value);
+    if (nextInstrument === state.sf2Instrument) return;
+    state.sf2Instrument = nextInstrument;
+    persistAppSettings();
+    stopNativePlayback();
+    disposeSf2Synth();
+    _sf2UnavailableReason = '';
+    if (state.preferSf2Playback) {
+      try { await ensureSf2SynthReady(); } catch (_) {}
+    }
+    setStatusMessage(
+      _uiFormat('Playback instrument set to {instrument}.', { instrument: getSf2InstrumentPreset(nextInstrument).label }),
+      'success'
+    );
+    renderDashboard(content);
+  });
   content.querySelector('#export-btn').addEventListener('click', _downloadMidi);
   content.querySelectorAll('[data-note-view]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -5837,6 +6153,14 @@ function renderDashboard(content) {
       'success'
     );
     renderDashboard(content);
+  });
+  content.querySelector('#keyboard-note-hints-toggle')?.addEventListener('click', () => {
+    if (state.stage !== 'ready') return;
+    state.keyboardNoteHintsOpen = !state.keyboardNoteHintsOpen;
+    if (_pianoRoll && typeof _pianoRoll.setComputerKeyHintsVisibility === 'function') {
+      _pianoRoll.setComputerKeyHintsVisibility(state.keyboardNoteHintsOpen);
+    }
+    _syncEditToolbar(content);
   });
   content.querySelector('#finger-suggest-toggle')?.addEventListener('click', () => {
     if (state.stage !== 'ready') return;
@@ -6060,11 +6384,61 @@ function _nudgeTransport(content, deltaSec) {
   _updateSeek(content);
 }
 
+function _isTextEditingElement(element) {
+  if (!element) return false;
+  if (element.isContentEditable) return true;
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName);
+}
+
+function _syncKeyboardPianoVisuals() {
+  if (!_pianoRoll || !_pianoRoll.pressedKeys || typeof _pianoRoll.pressedKeys.clear !== 'function') return;
+  _pianoRoll.pressedKeys.clear();
+  _keyboardPianoPressedKeys.forEach(key => {
+    const midi = COMPUTER_PIANO_KEY_MAP[key];
+    if (Number.isFinite(midi)) _pianoRoll.pressedKeys.add(midi);
+  });
+}
+
+function _releaseComputerKeyboardPiano() {
+  _keyboardPianoPressedKeys.clear();
+  _syncKeyboardPianoVisuals();
+}
+
+function _handleComputerKeyboardPianoKeyDown(e) {
+  if (state.page !== 'dashboard') return false;
+  if (state.noteEditMode || state.midiPlaying || state.stage === 'processing') return false;
+  if (e.metaKey || e.ctrlKey || e.altKey) return false;
+
+  const key = String(e.key || '').toLowerCase();
+  const midi = COMPUTER_PIANO_KEY_MAP[key];
+  if (!Number.isFinite(midi)) return false;
+
+  e.preventDefault();
+  if (e.repeat || _keyboardPianoPressedKeys.has(key)) return true;
+  _keyboardPianoPressedKeys.add(key);
+  _syncKeyboardPianoVisuals();
+  playPreviewNote(midi, 0.65, 0.92).catch(error => {
+    console.error('Computer keyboard preview error:', error);
+  });
+  return true;
+}
+
+function _handleComputerKeyboardPianoKeyUp(e) {
+  if (state.page !== 'dashboard') return false;
+  const key = String(e.key || '').toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(COMPUTER_PIANO_KEY_MAP, key)) return false;
+  if (_keyboardPianoPressedKeys.delete(key)) {
+    _syncKeyboardPianoVisuals();
+  }
+  return true;
+}
+
 function _handleTransportShortcuts(e) {
   if (state.page !== 'dashboard') return;
   const active = document.activeElement;
-  if (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) return;
-  if (active && active.isContentEditable) return;
+  if (_isTextEditingElement(active)) return;
+
+  if (_handleComputerKeyboardPianoKeyDown(e)) return;
 
   const content = document.getElementById('w-content');
   if (!content) return;
@@ -6091,16 +6465,25 @@ function _handleTransportShortcuts(e) {
   }
 }
 
+function _handleTransportShortcutsKeyUp(e) {
+  _handleComputerKeyboardPianoKeyUp(e);
+}
+
 function bindTransportShortcuts() {
   if (_transportKeysBound) return;
   _transportKeysBound = true;
   window.addEventListener('keydown', _handleTransportShortcuts);
+  window.addEventListener('keyup', _handleTransportShortcutsKeyUp);
+  window.addEventListener('blur', _releaseComputerKeyboardPiano);
 }
 
 function unbindTransportShortcuts() {
   if (!_transportKeysBound) return;
   _transportKeysBound = false;
   window.removeEventListener('keydown', _handleTransportShortcuts);
+  window.removeEventListener('keyup', _handleTransportShortcutsKeyUp);
+  window.removeEventListener('blur', _releaseComputerKeyboardPiano);
+  _releaseComputerKeyboardPiano();
 }
 
 function _midiTick(content) {
@@ -6151,7 +6534,10 @@ async function _midiPlayPause(content) {
   if (state.preferSf2Playback && !_sf2Synth && !_sf2UnavailableReason) {
     try {
       await ensureSf2SynthReady();
-      setStatusMessage('Playback using Full Grand Piano.sf2.', 'success');
+      setStatusMessage(
+        _uiFormat('Playback using {instrument}.', { instrument: getSf2InstrumentPreset(state.sf2Instrument).label }),
+        'success'
+      );
     } catch (error) {
       setStatusMessage(`${error.message} Using built-in synth instead.`, 'error');
     }
@@ -6202,7 +6588,7 @@ function _downloadMidi() {
   const url = URL.createObjectURL(state.midiBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `transcription_${getBackendModel()}.mid`;
+  a.download = normalizeMidiFileName(state.midiSourceName || getMidiSourceNameFallback());
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -6246,7 +6632,8 @@ async function _extractMidiData(midiBlob) {
   };
 }
 
-async function _applyMidiBlob(midiBlob, successMessage) {
+async function _applyMidiBlob(midiBlob, successMessage, options = {}) {
+  const sourceName = normalizeMidiFileName(options.sourceName || state.midiSourceName || getMidiSourceNameFallback());
   const midiData = await _extractMidiData(midiBlob);
   const effectiveNotes = _applyPlaybackPerformanceStyle(midiData.notes);
   const effectiveDuration = effectiveNotes.length
@@ -6256,6 +6643,7 @@ async function _applyMidiBlob(midiBlob, successMessage) {
   resetMidiData();
   state.midiBlob = midiBlob;
   state.midiUrl = URL.createObjectURL(midiBlob);
+  state.midiSourceName = sourceName;
   state.rawMidiNotes = _cloneNotes(midiData.notes);
   state.rawMidiDuration = midiData.duration;
   state.midiNotes = _cloneNotes(effectiveNotes);
@@ -6393,7 +6781,11 @@ async function _loadDemoMidi(content) {
 
   try {
     const demoBlob = _buildDemoMidiBlob();
-    await _applyMidiBlob(demoBlob, 'Demo MIDI loaded. Press Play to preview the piano.');
+    await _applyMidiBlob(
+      demoBlob,
+      'Demo MIDI loaded. Press Play to preview the piano.',
+      { sourceName: 'demo.mid' }
+    );
   } catch (error) {
     setStatusMessage(`Demo MIDI error: ${error.message}`, 'error');
   }
@@ -6489,11 +6881,24 @@ async function _handleRecord() {
     if (_recTimer) clearTimeout(_recTimer);
   } else {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recordingInputMode = normalizeRecordingInputMode(state.recordingInput);
+      let stream = null;
+      if (recordingInputMode === 'internal') {
+        await ensureNativeAudioReady();
+        stream = getInternalRecordingStream();
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      if (!stream) {
+        throw new Error('Could not start recording stream.');
+      }
+
       const mimeCandidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/ogg'];
       const mimeType = mimeCandidates.find(type => window.MediaRecorder && MediaRecorder.isTypeSupported(type)) || '';
       _mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       _audioChunks = [];
+      _activeRecordingStream = stream;
+      _activeRecordingInputMode = recordingInputMode;
 
       _recordingStartedAt = Date.now();
       if (_recTimer) clearTimeout(_recTimer);
@@ -6506,13 +6911,20 @@ async function _handleRecord() {
       _mediaRecorder.ondataavailable = e => { if (e.data.size > 0) _audioChunks.push(e.data); };
       _mediaRecorder.onstop = async () => {
         _stopRecordingWaveform();
-        stream.getTracks().forEach(t => t.stop());
+        const activeStream = _activeRecordingStream;
+        const activeInputMode = _activeRecordingInputMode;
+        if (activeStream && activeInputMode !== 'internal') {
+          activeStream.getTracks().forEach(t => t.stop());
+        }
+        _activeRecordingStream = null;
+        _activeRecordingInputMode = DEFAULT_SETTINGS.recordingInput;
         state.isRecording = false;
         if (_recTimer) clearTimeout(_recTimer);
         const blobType = _mediaRecorder.mimeType || mimeType || 'audio/webm';
         const blob = new Blob(_audioChunks, { type: blobType });
-        const extension = blobType.includes('ogg') ? 'ogg' : 'webm';
-        const recordedFile = new File([blob], `recording.${extension}`, { type: blobType });
+        const extension = inferRecordingFileExtension(blobType);
+        const recordPrefix = activeInputMode === 'internal' ? 'internal_recording' : 'recording';
+        const recordedFile = new File([blob], `${recordPrefix}.${extension}`, { type: blobType });
 
         if (blob.size > MAX_AUDIO_BYTES) {
           state.isRecording = false;
@@ -6528,7 +6940,7 @@ async function _handleRecord() {
           const entry = await saveAudioEntry({
             blob,
             name: recordedFile.name,
-            source: 'recording',
+            source: activeInputMode === 'internal' ? 'internal_recording' : 'recording',
             durationMs,
           });
           localStorage.setItem(STORAGE_KEYS.lastAudioId, entry.id);
@@ -6571,7 +6983,9 @@ async function _handleRecord() {
       return;
     } catch (error) {
       state.isRecording = false;
-      setStatusMessage(`Microphone error: ${error.message}`, 'error');
+      const mode = normalizeRecordingInputMode(state.recordingInput);
+      const base = mode === 'internal' ? _uiText('Internal recording error') : _uiText('Microphone error');
+      setStatusMessage(`${base}: ${error.message}`, 'error');
     }
   }
   renderDashboard(content);
@@ -6628,11 +7042,66 @@ async function _loadAudioFileFromUserInput(file, content) {
   }
 }
 
+async function _loadMidiFileFromUserInput(file, content) {
+  if (!file) return;
+  const targetContent = content || document.getElementById('w-content');
+  if (state.stage === 'processing') {
+    setStatusMessage(_uiText('Wait for the current conversion to finish before loading a MIDI file.'), 'error');
+    renderDashboard(targetContent);
+    return;
+  }
+  if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+    try { _mediaRecorder.stop(); } catch (_) {}
+  }
+  _stopRecordingWaveform();
+  state.isRecording = false;
+  if (_recTimer) clearTimeout(_recTimer);
+
+  if (file.size > MAX_MIDI_BYTES) {
+    setStatusMessage(_uiText('MIDI file is too large. Please choose a smaller .mid/.midi file.'), 'error');
+    renderDashboard(targetContent);
+    return;
+  }
+
+  const hasMidiExt = /\.midi?$/i.test(file.name || '');
+  const hasMidiType = /midi/i.test(file.type || '');
+  if (!hasMidiExt && !hasMidiType) {
+    setStatusMessage(_uiText('Invalid file type. Please upload a .mid or .midi file.'), 'error');
+    renderDashboard(targetContent);
+    return;
+  }
+
+  state.compareRunning = false;
+  state.compareProgress = 0;
+  state.compareResults = null;
+  clearStatusMessage();
+
+  try {
+    await _applyMidiBlob(
+      file,
+      _uiFormat('MIDI loaded: {name}. You can edit notes and export it again.', { name: file.name }),
+      { sourceName: file.name || 'uploaded.mid' }
+    );
+  } catch (error) {
+    setStatusMessage(`${_uiText('MIDI load error:')} ${error.message}`, 'error');
+  }
+
+  renderDashboard(targetContent);
+}
+
 async function _handleUpload(e) {
   const file = e.target.files?.[0];
   if (!file) return;
   const content = document.getElementById('w-content');
   await _loadAudioFileFromUserInput(file, content);
+  e.target.value = '';
+}
+
+async function _handleMidiUpload(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const content = document.getElementById('w-content');
+  await _loadMidiFileFromUserInput(file, content);
   e.target.value = '';
 }
 
@@ -6825,7 +7294,11 @@ async function _useCompareResult(content, modelId) {
   }
   state.selectedModel = normalizedModel || state.selectedModel;
   persistAppSettings();
-  await _applyMidiBlob(record.midiBlob, `${_getModelDisplayName(state.selectedModel)} result loaded from comparison.`);
+  await _applyMidiBlob(
+    record.midiBlob,
+    `${_getModelDisplayName(state.selectedModel)} result loaded from comparison.`,
+    { sourceName: `comparison_${normalizeModelId(record.modelId) || 'model'}.mid` }
+  );
   renderDashboard(content);
   return true;
 }
@@ -6922,7 +7395,13 @@ async function _handleConvert(content) {
       _progressTimer = null;
     }
 
-    await _applyMidiBlob(midiBlob, 'MIDI conversion complete.');
+    const sourceBase = String(audioFile.name || 'transcription').replace(/\.[^/.]+$/, '') || 'transcription';
+    const modelSuffix = normalizeModelId(getBackendModel()) || 'transkun';
+    await _applyMidiBlob(
+      midiBlob,
+      'MIDI conversion complete.',
+      { sourceName: `${sourceBase}_${modelSuffix}.mid` }
+    );
     await recordConversionHistory({
       fileName: audioFile.name || 'input.wav',
       modelId: getBackendModel(),
@@ -7248,7 +7727,16 @@ function renderSettings(content) {
   const vp = ((s.velocitySensitivity) / 127) * 100;
   const pedalPct = Math.round(clampSettingNumber(s.pedalAssistAmount, 0, 1, DEFAULT_SETTINGS.pedalAssistAmount) * 100);
   const activeModelLabel = s.selectedModel === 'onsets_and_frames' ? 'Onsets & Frames' : 'TransKun';
+  const recordingInputLabel = normalizeRecordingInputMode(s.recordingInput) === 'internal'
+    ? _uiText('Internal Piano')
+    : _uiText('Ambient Mic');
   const fingerAlgoLabel = s.fingerSuggestionAlgorithm === 'manual' ? 'Manual Only' : 'Smart Auto';
+  const sf2Preset = getSf2InstrumentPreset(s.sf2Instrument);
+  const sf2PresetLabel = sf2Preset.label;
+  const sf2OptionsHtml = SF2_INSTRUMENT_IDS.map(id => {
+    const preset = getSf2InstrumentPreset(id);
+    return `<option value="${preset.id}" ${preset.id === sf2Preset.id ? 'selected' : ''}>${preset.label}</option>`;
+  }).join('');
   const playbackProfileId = normalizePlaybackProfile(s.playbackProfile);
   const playbackProfileLabel = playbackProfileId === 'studio'
     ? _tk('settings.playback_profile.studio', {}, 'Studio')
@@ -7299,6 +7787,14 @@ function renderSettings(content) {
           <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Auto-convert After Upload / Recording</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Starts conversion immediately when audio is loaded.</p></div>${tgl('autoConvert', s.autoConvert)}</div>
           <div class="w-divider"></div>
           <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">${_uiText('Record Source')}:</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Choose microphone or internal piano bus for recording.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button class="w-quality-tab ${normalizeRecordingInputMode(s.recordingInput) === 'mic' ? 'active' : ''}" data-setting-record-source="mic">Ambient Mic</button>
+              <button class="w-quality-tab ${normalizeRecordingInputMode(s.recordingInput) === 'internal' ? 'active' : ''}" data-setting-record-source="internal">Internal Piano</button>
+            </div>
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
             <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Finger Suggestion Algorithm</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Smart Auto uses a global dynamic-programming pass with playability constraints.</p></div>
             <div style="display:flex;align-items:center;gap:8px;">
               <button class="w-quality-tab ${s.fingerSuggestionAlgorithm === 'legacy' ? 'active' : ''}" data-setting-finger-algo="legacy">Smart Auto</button>
@@ -7321,8 +7817,17 @@ function renderSettings(content) {
           </div>
           <div class="w-divider"></div>
           <div class="w-setting-row">
-            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Use Full Grand Piano.sf2</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">When enabled, playback uses the SF2 soundfont when available.</p></div>
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Use SF2 Soundfont Engine</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">When enabled, playback uses the selected SF2 soundfont when available.</p></div>
             ${tgl('preferSf2Playback', s.preferSf2Playback)}
+          </div>
+          <div class="w-divider"></div>
+          <div class="w-setting-row">
+            <div><p style="font-size:12px;color:#d1d5db;font-weight:500;">SF2 Instrument</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Select the instrument used by the SF2 preview engine.</p></div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+              <select id="settings-sf2-instrument" class="w-select" style="min-width:230px;" ${s.preferSf2Playback ? '' : 'disabled'}>
+                ${sf2OptionsHtml}
+              </select>
+            </div>
           </div>
           <div class="w-divider"></div>
           <div class="w-setting-row">
@@ -7369,7 +7874,7 @@ function renderSettings(content) {
           <div class="w-section-title"><div class="w-section-icon">${ICON.bell(15,'#a78bfa')}</div><span style="font-size:13px;color:#e5e7eb;font-weight:600;">Notifications</span></div>
           <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Browser Notifications</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Notify when conversion succeeds or fails.</p></div><div style="display:flex;align-items:center;gap:8px;">${ICON.bell(13, s.notificationsOn ? '#a78bfa' : '#4b5563')}${tgl('notificationsOn', s.notificationsOn)}</div></div>
           <div class="w-divider"></div>
-          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · Profile: ${playbackProfileLabel} · SF2: ${s.preferSf2Playback ? 'On' : 'Off'} · Pedal: ${s.pedalAssist ? `${pedalPct}%` : 'Off'} · Finger Algo: ${fingerAlgoLabel}</p></div></div>
+          <div class="w-setting-row"><div><p style="font-size:12px;color:#d1d5db;font-weight:500;">Current Setup</p><p style="font-size:11px;color:#4b5563;margin-top:2px;">Model: ${activeModelLabel} · Auto-convert: ${s.autoConvert ? 'On' : 'Off'} · Record: ${recordingInputLabel} · Profile: ${playbackProfileLabel} · SF2: ${s.preferSf2Playback ? `On (${sf2PresetLabel})` : 'Off'} · Pedal: ${s.pedalAssist ? `${pedalPct}%` : 'Off'} · Finger Algo: ${fingerAlgoLabel}</p></div></div>
         </div>
       </div>
     </div>`;
@@ -7424,6 +7929,14 @@ function renderSettings(content) {
     const nextModel = normalizeModelId(btn.dataset.settingModel);
     if (!nextModel || nextModel === s.selectedModel) return;
     s.selectedModel = nextModel;
+    persistAppSettings();
+    renderSettings(content);
+  }));
+
+  content.querySelectorAll('[data-setting-record-source]').forEach(button => button.addEventListener('click', () => {
+    const nextSource = normalizeRecordingInputMode(button.dataset.settingRecordSource);
+    if (nextSource === s.recordingInput) return;
+    s.recordingInput = nextSource;
     persistAppSettings();
     renderSettings(content);
   }));
@@ -7486,6 +7999,20 @@ function renderSettings(content) {
     renderSettings(content);
   });
 
+  content.querySelector('#settings-sf2-instrument')?.addEventListener('change', async e => {
+    const nextInstrument = normalizeSf2Instrument(e.target?.value);
+    if (nextInstrument === s.sf2Instrument) return;
+    s.sf2Instrument = nextInstrument;
+    persistAppSettings();
+    stopNativePlayback();
+    disposeSf2Synth();
+    _sf2UnavailableReason = '';
+    if (s.preferSf2Playback) {
+      try { await ensureSf2SynthReady(); } catch (_) {}
+    }
+    renderSettings(content);
+  });
+
   content.querySelector('#settings-ui-language')?.addEventListener('change', e => {
     s.uiLanguage = normalizeUiLanguage(e.target?.value);
     persistUiLanguageSettings();
@@ -7501,7 +8028,9 @@ function renderSettings(content) {
       autoConvert: DEFAULT_SETTINGS.autoConvert,
       velocitySensitivity: DEFAULT_SETTINGS.velocitySensitivity,
       notificationsOn: DEFAULT_SETTINGS.notificationsOn,
+      recordingInput: DEFAULT_SETTINGS.recordingInput,
       preferSf2Playback: DEFAULT_SETTINGS.preferSf2Playback,
+      sf2Instrument: DEFAULT_SETTINGS.sf2Instrument,
       pedalAssist: DEFAULT_SETTINGS.pedalAssist,
       pedalAssistAmount: DEFAULT_SETTINGS.pedalAssistAmount,
       fingerSuggestionAlgorithm: DEFAULT_SETTINGS.fingerSuggestionAlgorithm,
@@ -7566,8 +8095,14 @@ const UI_STATIC_TRANSLATIONS = {
     Home: 'Inicio',
     'AUDIO INPUT': 'ENTRADA DE AUDIO',
     'Record piano audio': 'Grabar audio de piano',
+    '● Recording...': '● Grabando...',
+    'Record Source': 'Fuente de grabación',
+    'Ambient Mic': 'Micrófono ambiente',
+    'Internal Piano': 'Piano interno',
     'Upload audio file': 'Subir archivo de audio',
+    'Upload MIDI file': 'Subir archivo MIDI',
     'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrastra y suelta audio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    'Drag and drop audio or MIDI here (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)': 'Arrastra y suelta audio o MIDI aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)',
     Clear: 'Limpiar',
     'AI MODEL': 'MODELO IA',
     'Convert to MIDI': 'Convertir a MIDI',
@@ -7589,6 +8124,12 @@ const UI_STATIC_TRANSLATIONS = {
     'No MIDI yet': 'Aún no hay MIDI',
     'Upload or record audio, then convert.': 'Sube o graba audio y luego convierte.',
     'Export .mid file': 'Exportar archivo .mid',
+    Instrument: 'Instrumento',
+    'Virtual Keyboard: A W S E D F T G Y H U J · K O L P ; \' · Z X C V B N M': 'Teclado virtual: A W S E D F T G Y H U J · K O L P ; \' · Z X C V B N M',
+    'Keyboard Notes': 'Notas ↔ teclado',
+    'Hide Keyboard Notes': 'Ocultar notas ↔ teclado',
+    'Computer Keyboard Mapping': 'Equivalencia teclado del ordenador',
+    'MIDI Source:': 'Fuente MIDI:',
     'PIANO ROLL': 'PIANO ROLL',
     'MUSIC SCORE': 'PARTITURA',
     Roll: 'Roll',
@@ -7622,6 +8163,7 @@ const UI_STATIC_TRANSLATIONS = {
     '88 KEYS · SYNTHESIA VIEW': '88 TECLAS · VISTA SYNTHESIA',
     'GRAND STAFF · EDITABLE': 'DOBLE PENTAGRAMA · EDITABLE',
     'MIDI conversion complete!': '¡Conversión MIDI completada!',
+    'MIDI ready.': 'MIDI listo.',
     'Use Result': 'Usar resultado',
     Download: 'Descargar',
     Retry: 'Reintentar',
@@ -7665,9 +8207,14 @@ const UI_STATIC_TRANSLATIONS = {
     'Active model for new conversions.': 'Modelo activo para nuevas conversiones.',
     'Auto-convert After Upload / Recording': 'Auto-convertir tras subir / grabar',
     'Starts conversion immediately when audio is loaded.': 'Inicia la conversión automáticamente al cargar audio.',
+    'Choose microphone or internal piano bus for recording.': 'Elige micrófono o bus interno del piano para grabar.',
     'Finger Suggestion Algorithm': 'Algoritmo de sugerencia de dedos',
+    'Use SF2 Soundfont Engine': 'Usar motor SF2 Soundfont',
+    'When enabled, playback uses the selected SF2 soundfont when available.': 'Cuando está activado, la reproducción usa el SF2 seleccionado cuando está disponible.',
     'Use Full Grand Piano.sf2': 'Usar Full Grand Piano.sf2',
     'When enabled, playback uses the SF2 soundfont when available.': 'Cuando está activado, la reproducción usa el soundfont SF2 cuando está disponible.',
+    'SF2 Instrument': 'Instrumento SF2',
+    'Select the instrument used by the SF2 preview engine.': 'Selecciona el instrumento usado por el motor de preescucha SF2.',
     'Pedal Assist (anti-staccato)': 'Asistencia de pedal (anti-staccato)',
     'Extends note tails to preserve legato feel when the source is not staccato.': 'Alarga la cola de las notas para mantener un legato natural si la fuente no es staccato.',
     'Pedal Assist Amount': 'Intensidad de asistencia de pedal',
@@ -7686,6 +8233,18 @@ const UI_STATIC_TRANSLATIONS = {
     'Testing connection to': 'Probando conexión con',
     'Connection successful:': 'Conexión correcta:',
     'Connection failed:': 'Conexión fallida:',
+    'Recording source switched to Internal Piano.': 'Fuente de grabación cambiada a Piano interno.',
+    'Recording source switched to Ambient Mic.': 'Fuente de grabación cambiada a Micrófono ambiente.',
+    'Internal recording error': 'Error de grabación interna',
+    'Microphone error': 'Error de micrófono',
+    'Wait for the current conversion to finish before loading a MIDI file.': 'Espera a que termine la conversión actual antes de cargar un archivo MIDI.',
+    'MIDI file is too large. Please choose a smaller .mid/.midi file.': 'El archivo MIDI es demasiado grande. Elige un archivo .mid/.midi más pequeño.',
+    'Invalid file type. Please upload a .mid or .midi file.': 'Tipo de archivo no válido. Sube un archivo .mid o .midi.',
+    'Use the MIDI Player upload button for .mid/.midi files.': 'Para archivos .mid/.midi usa el botón de subida del reproductor MIDI.',
+    'MIDI loaded: {name}. You can edit notes and export it again.': 'MIDI cargado: {name}. Puedes editar notas y volver a exportarlo.',
+    'MIDI load error:': 'Error al cargar MIDI:',
+    'Playback instrument set to {instrument}.': 'Instrumento de reproducción cambiado a {instrument}.',
+    'Playback using {instrument}.': 'Reproducción usando {instrument}.',
     On: 'Activado',
     Off: 'Desactivado',
     'Playback Profile': 'Perfil de reproducción',
@@ -7791,8 +8350,14 @@ const UI_STATIC_TRANSLATIONS = {
     Home: 'Inici',
     'AUDIO INPUT': 'ENTRADA D\'ÀUDIO',
     'Record piano audio': 'Gravar àudio de piano',
+    '● Recording...': '● Gravant...',
+    'Record Source': 'Font de gravació',
+    'Ambient Mic': 'Micròfon ambient',
+    'Internal Piano': 'Piano intern',
     'Upload audio file': 'Pujar fitxer d\'àudio',
+    'Upload MIDI file': 'Pujar fitxer MIDI',
     'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrossega i deixa anar l\'àudio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    'Drag and drop audio or MIDI here (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)': 'Arrossega i deixa anar àudio o MIDI aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)',
     Clear: 'Netejar',
     'AI MODEL': 'MODEL IA',
     'Convert to MIDI': 'Convertir a MIDI',
@@ -7814,6 +8379,12 @@ const UI_STATIC_TRANSLATIONS = {
     'No MIDI yet': 'Encara no hi ha MIDI',
     'Upload or record audio, then convert.': 'Puja o grava àudio i després converteix.',
     'Export .mid file': 'Exportar fitxer .mid',
+    Instrument: 'Instrument',
+    'Virtual Keyboard: A W S E D F T G Y H U J · K O L P ; \' · Z X C V B N M': 'Teclat virtual: A W S E D F T G Y H U J · K O L P ; \' · Z X C V B N M',
+    'Keyboard Notes': 'Notes ↔ teclat',
+    'Hide Keyboard Notes': 'Amagar notes ↔ teclat',
+    'Computer Keyboard Mapping': 'Equivalència teclat de l\'ordinador',
+    'MIDI Source:': 'Font MIDI:',
     'PIANO ROLL': 'PIANO ROLL',
     'MUSIC SCORE': 'PARTITURA',
     Roll: 'Roll',
@@ -7846,6 +8417,7 @@ const UI_STATIC_TRANSLATIONS = {
     '88 KEYS · SYNTHESIA VIEW': '88 TECLES · VISTA SYNTHESIA',
     'GRAND STAFF · EDITABLE': 'DOBLE PENTAGRAMA · EDITABLE',
     'MIDI conversion complete!': 'Conversió MIDI completada!',
+    'MIDI ready.': 'MIDI a punt.',
     'Use Result': 'Fer servir resultat',
     Download: 'Descarregar',
     Retry: 'Reintentar',
@@ -7889,9 +8461,14 @@ const UI_STATIC_TRANSLATIONS = {
     'Active model for new conversions.': 'Model actiu per a noves conversions.',
     'Auto-convert After Upload / Recording': 'Auto-conversió després de pujar / gravar',
     'Starts conversion immediately when audio is loaded.': 'Inicia la conversió immediatament quan es carrega l\'àudio.',
+    'Choose microphone or internal piano bus for recording.': 'Tria micròfon o bus intern del piano per gravar.',
     'Finger Suggestion Algorithm': 'Algoritme de suggeriment de dits',
+    'Use SF2 Soundfont Engine': 'Fer servir el motor SF2 Soundfont',
+    'When enabled, playback uses the selected SF2 soundfont when available.': 'Quan està activat, la reproducció utilitza el SF2 seleccionat quan està disponible.',
     'Use Full Grand Piano.sf2': 'Fer servir Full Grand Piano.sf2',
     'When enabled, playback uses the SF2 soundfont when available.': 'Quan està activat, la reproducció fa servir el soundfont SF2 quan està disponible.',
+    'SF2 Instrument': 'Instrument SF2',
+    'Select the instrument used by the SF2 preview engine.': 'Selecciona l\'instrument utilitzat pel motor de previsualització SF2.',
     'Pedal Assist (anti-staccato)': 'Assistència de pedal (anti-staccato)',
     'Extends note tails to preserve legato feel when the source is not staccato.': 'Allarga la cua de les notes per mantenir una sensació legato quan la font no és staccato.',
     'Pedal Assist Amount': 'Intensitat d\'assistència de pedal',
@@ -7910,6 +8487,18 @@ const UI_STATIC_TRANSLATIONS = {
     'Testing connection to': 'Provant connexió amb',
     'Connection successful:': 'Connexió correcta:',
     'Connection failed:': 'Connexió fallida:',
+    'Recording source switched to Internal Piano.': 'Font de gravació canviada a Piano intern.',
+    'Recording source switched to Ambient Mic.': 'Font de gravació canviada a Micròfon ambient.',
+    'Internal recording error': 'Error de gravació interna',
+    'Microphone error': 'Error de micròfon',
+    'Wait for the current conversion to finish before loading a MIDI file.': 'Espera que acabi la conversió actual abans de carregar un fitxer MIDI.',
+    'MIDI file is too large. Please choose a smaller .mid/.midi file.': 'El fitxer MIDI és massa gran. Tria un fitxer .mid/.midi més petit.',
+    'Invalid file type. Please upload a .mid or .midi file.': 'Tipus de fitxer no vàlid. Puja un fitxer .mid o .midi.',
+    'Use the MIDI Player upload button for .mid/.midi files.': 'Per a fitxers .mid/.midi fes servir el botó de pujada del reproductor MIDI.',
+    'MIDI loaded: {name}. You can edit notes and export it again.': 'MIDI carregat: {name}. Pots editar notes i tornar-lo a exportar.',
+    'MIDI load error:': 'Error en carregar MIDI:',
+    'Playback instrument set to {instrument}.': 'Instrument de reproducció canviat a {instrument}.',
+    'Playback using {instrument}.': 'Reproducció amb {instrument}.',
     On: 'Activat',
     Off: 'Desactivat',
     'Playback Profile': 'Perfil de reproducció',
@@ -8237,6 +8826,9 @@ function _renderHeader() {
 }
 
 function renderPage(content) {
+  if (state.page !== 'dashboard') {
+    _releaseComputerKeyboardPiano();
+  }
   if (state.page === 'home') {
     renderHome(content);
   } else if (state.page === 'dashboard') {
