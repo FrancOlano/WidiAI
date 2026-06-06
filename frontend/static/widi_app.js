@@ -132,40 +132,52 @@ const SF2_INSTRUMENT_PRESETS = Object.freeze({
 const SF2_INSTRUMENT_IDS = Object.freeze(Object.keys(SF2_INSTRUMENT_PRESETS));
 const SF2_FLUID_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/externals/libfluidsynth-2.4.6.js';
 const SF2_SYNTH_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/js-synthesizer@1.13.0/dist/js-synthesizer.min.js';
-const COMPUTER_PIANO_KEY_MAP = Object.freeze({
-  a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71,
-  k: 72, o: 73, l: 74, p: 75, ';': 76, "'": 77,
-  z: 77, x: 78, c: 79, v: 80, b: 81, n: 82, m: 83,
+const MIDI_TRACK_COLORS = Object.freeze([
+  '#60a5fa',
+  '#f472b6',
+  '#34d399',
+  '#fbbf24',
+  '#a78bfa',
+  '#fb7185',
+  '#22d3ee',
+  '#f97316',
+]);
+const DEFAULT_MIDI_TRACK_ID = 'track_1';
+const COMPUTER_KEYBOARD_BASE_MIN = 21;
+const COMPUTER_KEYBOARD_BASE_MAX = 85;
+const COMPUTER_PIANO_KEY_OFFSETS = Object.freeze([
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+  12, 13, 14, 15, 16, 17,
+  17, 18, 19, 20, 21, 22, 23,
+]);
+const COMPUTER_PIANO_KEYBOARD_LAYOUTS = Object.freeze({
+  us: Object.freeze({
+    id: 'us',
+    label: 'US',
+    keys: Object.freeze(['a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k', 'o', 'l', 'p', ';', "'", 'z', 'x', 'c', 'v', 'b', 'n', 'm']),
+    aliases: Object.freeze({}),
+  }),
+  es: Object.freeze({
+    id: 'es',
+    label: 'ES',
+    keys: Object.freeze(['a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k', 'o', 'l', 'p', 'ñ', '´', 'z', 'x', 'c', 'v', 'b', 'n', 'm']),
+    aliases: Object.freeze({ dead: '´', "'": '´', ';': 'ñ' }),
+  }),
 });
-const COMPUTER_PIANO_KEY_ORDER = Object.freeze(Object.keys(COMPUTER_PIANO_KEY_MAP));
+const DEFAULT_COMPUTER_KEYBOARD_LAYOUT = 'us';
+const DEFAULT_COMPUTER_KEYBOARD_BASE = 60;
+
+const getDefaultComputerKeyboardLayoutForLanguage = (lang) => {
+  const normalized = normalizeI18nLang(lang);
+  return normalized === 'es' || normalized === 'ca' ? 'es' : DEFAULT_COMPUTER_KEYBOARD_LAYOUT;
+};
 
 function _formatComputerKeyboardKey(key) {
   const raw = String(key || '').trim();
   if (!raw) return '';
+  if (raw.toLowerCase() === 'dead') return '´';
   return raw.length === 1 ? raw.toUpperCase() : raw;
 }
-
-const COMPUTER_PIANO_KEYS_BY_MIDI = (() => {
-  const map = new Map();
-  COMPUTER_PIANO_KEY_ORDER.forEach(key => {
-    const midi = COMPUTER_PIANO_KEY_MAP[key];
-    if (!Number.isFinite(midi)) return;
-    const label = _formatComputerKeyboardKey(key);
-    const current = map.get(midi) || [];
-    if (!current.includes(label)) current.push(label);
-    map.set(midi, current);
-  });
-  return map;
-})();
-
-const COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI = Object.freeze((() => {
-  const out = {};
-  COMPUTER_PIANO_KEYS_BY_MIDI.forEach((labels, midi) => {
-    const preferred = labels.find(label => /^[A-Z]$/.test(label)) || labels[0] || '';
-    out[midi] = preferred;
-  });
-  return out;
-})());
 
 const DEFAULT_SETTINGS = Object.freeze({
   autoConvert: false,
@@ -219,6 +231,60 @@ const normalizeRecordingInputMode = (value) => {
 const normalizeUiLanguage = (value) => {
   return normalizeI18nLang(value);
 };
+
+const normalizeComputerKeyboardLayout = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return COMPUTER_PIANO_KEYBOARD_LAYOUTS[normalized] ? normalized : DEFAULT_COMPUTER_KEYBOARD_LAYOUT;
+};
+
+const normalizeComputerKeyboardBase = (value) => {
+  const numeric = Math.round(Number(value));
+  if (!Number.isFinite(numeric)) return DEFAULT_COMPUTER_KEYBOARD_BASE;
+  return Math.max(COMPUTER_KEYBOARD_BASE_MIN, Math.min(COMPUTER_KEYBOARD_BASE_MAX, numeric));
+};
+
+const getComputerKeyboardLayout = () => {
+  const id = normalizeComputerKeyboardLayout(state.computerKeyboardLayout);
+  return COMPUTER_PIANO_KEYBOARD_LAYOUTS[id] || COMPUTER_PIANO_KEYBOARD_LAYOUTS[DEFAULT_COMPUTER_KEYBOARD_LAYOUT];
+};
+
+function getComputerKeyboardSpecs(layoutId = state.computerKeyboardLayout, base = state.computerKeyboardBase) {
+  const layout = COMPUTER_PIANO_KEYBOARD_LAYOUTS[normalizeComputerKeyboardLayout(layoutId)];
+  const root = normalizeComputerKeyboardBase(base);
+  return layout.keys.map((key, index) => {
+    const midi = Math.max(MIDI_LO, Math.min(MIDI_HI, root + (COMPUTER_PIANO_KEY_OFFSETS[index] || 0)));
+    return {
+      key,
+      label: _formatComputerKeyboardKey(key),
+      midi,
+      note: midiToNoteName(midi),
+      offset: COMPUTER_PIANO_KEY_OFFSETS[index] || 0,
+    };
+  });
+}
+
+function getComputerKeyboardMap(layoutId = state.computerKeyboardLayout, base = state.computerKeyboardBase) {
+  const layout = COMPUTER_PIANO_KEYBOARD_LAYOUTS[normalizeComputerKeyboardLayout(layoutId)];
+  const map = new Map();
+  getComputerKeyboardSpecs(layout.id, base).forEach(spec => {
+    map.set(spec.key.toLowerCase(), spec);
+  });
+  Object.entries(layout.aliases || {}).forEach(([alias, target]) => {
+    const spec = map.get(String(target).toLowerCase());
+    if (spec) map.set(String(alias).toLowerCase(), spec);
+  });
+  return map;
+}
+
+function getComputerKeyboardHintsByMidi(layoutId = state.computerKeyboardLayout, base = state.computerKeyboardBase) {
+  const hints = new Map();
+  getComputerKeyboardSpecs(layoutId, base).forEach(spec => {
+    const current = hints.get(spec.midi) || [];
+    if (!current.includes(spec.label)) current.push(spec.label);
+    hints.set(spec.midi, current);
+  });
+  return hints;
+}
 
 const PROD_API_URL = 'https://widiai-backend.duckdns.org';
 
@@ -583,11 +649,15 @@ const state = {
   rawMidiNotes: [],
   rawMidiDuration: 0,
   midiNotes: [],
+  midiTracks: [{ id: DEFAULT_MIDI_TRACK_ID, name: 'Piano 1', color: MIDI_TRACK_COLORS[0] }],
+  activeMidiTrackId: DEFAULT_MIDI_TRACK_ID,
   midiDuration: 0,
   midiTempo: null,
   noteEditMode: false,
   noteEditorView: 'roll',
   keyboardNoteHintsOpen: false,
+  computerKeyboardLayout: getDefaultComputerKeyboardLayoutForLanguage(storedUiLanguage),
+  computerKeyboardBase: DEFAULT_COMPUTER_KEYBOARD_BASE,
   noteGuideOpen: storedGuideOpen,
   noteHistoryOpen: false,
   scoreReadableMode: false,
@@ -669,6 +739,67 @@ const clearStatusMessage = () => {
   state.statusType = 'info';
 };
 
+function makeMidiTrackId(index = 1) {
+  return `track_${Math.max(1, Math.round(Number(index) || 1))}`;
+}
+
+function normalizeMidiTrackId(value) {
+  const raw = String(value || '').trim();
+  return raw || DEFAULT_MIDI_TRACK_ID;
+}
+
+function getDefaultMidiTracks() {
+  return [{ id: DEFAULT_MIDI_TRACK_ID, name: 'Piano 1', color: MIDI_TRACK_COLORS[0] }];
+}
+
+function normalizeMidiTracks(tracks = [], notes = []) {
+  const byId = new Map();
+  (Array.isArray(tracks) ? tracks : []).forEach((track, index) => {
+    const id = normalizeMidiTrackId(track?.id || makeMidiTrackId(index + 1));
+    if (byId.has(id)) return;
+    byId.set(id, {
+      id,
+      name: String(track?.name || `Piano ${byId.size + 1}`),
+      color: String(track?.color || MIDI_TRACK_COLORS[byId.size % MIDI_TRACK_COLORS.length]),
+    });
+  });
+
+  (Array.isArray(notes) ? notes : []).forEach(note => {
+    const id = normalizeMidiTrackId(note?.trackId);
+    if (!byId.has(id)) {
+      byId.set(id, {
+        id,
+        name: `Piano ${byId.size + 1}`,
+        color: MIDI_TRACK_COLORS[byId.size % MIDI_TRACK_COLORS.length],
+      });
+    }
+  });
+
+  if (!byId.size) {
+    getDefaultMidiTracks().forEach(track => byId.set(track.id, { ...track }));
+  }
+
+  return Array.from(byId.values());
+}
+
+function ensureMidiTracks() {
+  state.midiTracks = normalizeMidiTracks(state.midiTracks, state.midiNotes);
+  const hasActive = state.midiTracks.some(track => track.id === state.activeMidiTrackId);
+  if (!hasActive) state.activeMidiTrackId = state.midiTracks[0]?.id || DEFAULT_MIDI_TRACK_ID;
+  return state.midiTracks;
+}
+
+function getActiveMidiTrack() {
+  const tracks = ensureMidiTracks();
+  return tracks.find(track => track.id === state.activeMidiTrackId) || tracks[0] || getDefaultMidiTracks()[0];
+}
+
+function getMidiTrackColor(trackId) {
+  const tracks = ensureMidiTracks();
+  const track = tracks.find(item => item.id === normalizeMidiTrackId(trackId));
+  return track?.color || MIDI_TRACK_COLORS[0];
+}
+
 function getSf2InstrumentPreset(instrumentId = DEFAULT_SETTINGS.sf2Instrument) {
   const normalized = normalizeSf2Instrument(instrumentId);
   return SF2_INSTRUMENT_PRESETS[normalized] || SF2_INSTRUMENT_PRESETS[DEFAULT_SETTINGS.sf2Instrument];
@@ -699,6 +830,7 @@ function _buildPedalCompensatedNotes(notes, amount = state.pedalAssistAmount) {
     startTime: Math.max(0, Number(note.startTime) || 0),
     duration: Math.max(0.03, Number(note.duration) || 0.12),
     velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+    trackId: normalizeMidiTrackId(note.trackId),
     ...(Number.isInteger(Number(note.fingerOverride)) && Number(note.fingerOverride) >= 1 && Number(note.fingerOverride) <= 5
       ? { fingerOverride: Math.round(Number(note.fingerOverride)) }
       : {}),
@@ -839,6 +971,7 @@ function _cloneNotes(notes) {
     startTime: Math.max(0, Number(note.startTime) || 0),
     duration: Math.max(0.03, Number(note.duration) || 0.12),
     velocity: Math.max(1, Math.min(127, Math.round(Number(note.velocity) || 96))),
+    trackId: normalizeMidiTrackId(note.trackId),
     ...(Number.isInteger(Number(note.fingerOverride)) && Number(note.fingerOverride) >= 1 && Number(note.fingerOverride) <= 5
       ? { fingerOverride: Math.round(Number(note.fingerOverride)) }
       : {}),
@@ -855,6 +988,7 @@ function _notesEqual(a, b) {
       Math.abs((na.startTime || 0) - (nb.startTime || 0)) > 0.0001 ||
       Math.abs((na.duration || 0) - (nb.duration || 0)) > 0.0001 ||
       na.velocity !== nb.velocity ||
+      normalizeMidiTrackId(na.trackId) !== normalizeMidiTrackId(nb.trackId) ||
       (Number.isFinite(Number(na.fingerOverride)) ? Math.round(Number(na.fingerOverride)) : 0) !==
       (Number.isFinite(Number(nb.fingerOverride)) ? Math.round(Number(nb.fingerOverride)) : 0)
     ) {
@@ -1085,12 +1219,15 @@ function resetMidiData() {
   state.rawMidiNotes = [];
   state.rawMidiDuration = 0;
   state.midiNotes = [];
+  state.midiTracks = getDefaultMidiTracks();
+  state.activeMidiTrackId = DEFAULT_MIDI_TRACK_ID;
   state.midiDuration = 0;
   state.midiTempo = null;
   state.midiTime = 0;
   state.noteEditMode = false;
   state.noteEditorView = 'roll';
   state.keyboardNoteHintsOpen = false;
+  state.computerKeyboardBase = DEFAULT_COMPUTER_KEYBOARD_BASE;
   state.noteHistoryOpen = false;
   state.scoreReadableMode = false;
   state.fingerSuggestionMode = false;
@@ -1780,10 +1917,17 @@ function injectCSS(container) {
 .w-keyboard-hints-panel{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.06);background:linear-gradient(180deg,rgba(8,10,20,0.72),rgba(8,8,16,0.68));}
 .w-keyboard-hints-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
 .w-keyboard-hints-title{font-size:10px;color:#bfdbfe;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;}
-.w-keyboard-hints-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:6px;}
-.w-keyboard-hint-chip{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 7px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);}
+.w-keyboard-hints-meta{font-size:9px;font-weight:800;letter-spacing:0.05em;text-transform:uppercase;white-space:nowrap;}
+.w-keyboard-range-controls{display:flex;align-items:center;justify-content:flex-start;gap:6px;margin-bottom:8px;}
+.w-keyboard-layout-switch{display:flex;align-items:center;gap:4px;padding:3px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);}
+.w-keyboard-layout-btn{border:none;border-radius:6px;padding:5px 8px;background:transparent;color:#9ca3af;font-size:9px;font-weight:800;letter-spacing:0.05em;cursor:pointer;}
+.w-keyboard-layout-btn.active{background:rgba(45,212,191,0.18);color:#99f6e4;box-shadow:0 0 10px rgba(45,212,191,0.16);}
+.w-keyboard-range-box{display:grid;grid-template-columns:repeat(auto-fit,minmax(46px,1fr));gap:5px;padding:8px;border-radius:11px;border:1px solid color-mix(in srgb,var(--range-color) 48%,transparent);background:linear-gradient(135deg,color-mix(in srgb,var(--range-color) 18%,transparent),rgba(255,255,255,0.025));box-shadow:0 0 0 1px rgba(255,255,255,0.04) inset;cursor:grab;user-select:none;touch-action:none;}
+.w-keyboard-range-box.dragging{cursor:grabbing;border-color:rgba(153,246,228,0.78);box-shadow:0 0 0 1px rgba(153,246,228,0.25) inset,0 0 18px rgba(45,212,191,0.16);}
+.w-keyboard-range-box:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(45,212,191,0.45),0 0 0 1px rgba(255,255,255,0.04) inset;}
+.w-keyboard-hint-chip{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 7px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.22);}
+.w-keyboard-hint-key{font-size:10px;color:#f8fafc;font-weight:900;letter-spacing:0.05em;}
 .w-keyboard-hint-note{font-size:10px;color:#e5e7eb;font-weight:700;letter-spacing:0.03em;}
-.w-keyboard-hint-keys{font-size:9px;color:#93c5fd;font-weight:700;letter-spacing:0.06em;}
 .w-score-disclaimer{position:absolute;right:10px;bottom:8px;z-index:28;max-width:430px;padding:8px 11px;border-radius:10px;border:1px solid rgba(139,92,246,0.32);background:linear-gradient(135deg,rgba(59,130,246,0.3),rgba(139,92,246,0.24));font-size:10px;color:#f1f5f9;letter-spacing:0.01em;box-shadow:0 8px 18px rgba(0,0,0,0.35);}
 .w-score-disclaimer strong{color:#f5f3ff;font-weight:800;}
 
@@ -2795,6 +2939,9 @@ class PianoRoll {
     this.onUndoRequest = typeof options.onUndoRequest === 'function' ? options.onUndoRequest : null;
     this.onRedoRequest = typeof options.onRedoRequest === 'function' ? options.onRedoRequest : null;
     this.onFingerSuggestionUpdate = typeof options.onFingerSuggestionUpdate === 'function' ? options.onFingerSuggestionUpdate : null;
+    this.onComputerKeyboardBaseChange = typeof options.onComputerKeyboardBaseChange === 'function'
+      ? options.onComputerKeyboardBaseChange
+      : null;
     this.currentTime = 0;
     this.isPlaying = false;
     this.pressedKeys = new Set();
@@ -2804,12 +2951,17 @@ class PianoRoll {
     this.selectedNoteIndices = new Set();
     this.hoverNoteMode = null;
     this.draggingNote = null;
+    this.keyboardRangeDrag = null;
     this.lasso = null;
     this.isLassoSelecting = false;
     this.zoomX = Math.max(0.6, Math.min(2.4, Number(options.zoomX) || 1));
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
     this.showComputerKeyHints = Boolean(options.showComputerKeyHints);
+    this.activeTrackId = normalizeMidiTrackId(options.activeTrackId || state.activeMidiTrackId);
+    this.computerKeyHintsByMidi = options.computerKeyHintsByMidi instanceof Map
+      ? options.computerKeyHintsByMidi
+      : new Map();
     this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
     this.fingerSuggestionAlgorithm = normalizeFingerSuggestionAlgorithm(options.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = new Map();
@@ -3187,6 +3339,7 @@ class PianoRoll {
       startTime: this._rollTimeAtY(y),
       duration: 0.35,
       velocity: 96,
+      trackId: this.activeTrackId,
     };
 
     this.notes.push(note);
@@ -3241,6 +3394,7 @@ class PianoRoll {
         startTime: Math.max(0, (Number(source.startTime) || 0) + shiftSec),
         duration: Math.max(0.03, Number(source.duration) || 0.12),
         velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
+        trackId: normalizeMidiTrackId(source.trackId),
       };
       this.notes.push(duplicate);
       newIndices.push(this.notes.length - 1);
@@ -3365,6 +3519,66 @@ class PianoRoll {
     return null;
   }
 
+  _getComputerKeyboardRangeRect() {
+    if (!this.showComputerKeyHints || !this.computerKeyHintsByMidi || !this.computerKeyHintsByMidi.size) return null;
+    if (!Array.isArray(this.keys) || !this.keys.length) return null;
+    const midiValues = Array.from(this.computerKeyHintsByMidi.keys())
+      .map(Number)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    if (!midiValues.length) return null;
+    const keysByMidi = new Map(this.keys.map(key => [key.midi, key]));
+    const leftKey = keysByMidi.get(midiValues[0]);
+    const rightKey = keysByMidi.get(midiValues[midiValues.length - 1]);
+    if (!leftKey || !rightKey) return null;
+    const left = Math.min(leftKey.x, rightKey.x);
+    const right = Math.max(leftKey.x + leftKey.w, rightKey.x + rightKey.w);
+    const y = this.H - KEY_H + 3;
+    return {
+      x: Math.max(0, left + 1),
+      y,
+      w: Math.max(8, Math.min(this.W, right - left - 2)),
+      h: Math.max(12, KEY_H - 6),
+      handleH: 13,
+    };
+  }
+
+  _hitComputerKeyboardRangeHandle(x, y) {
+    const rect = this._getComputerKeyboardRangeRect();
+    if (!rect) return false;
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  }
+
+  _startComputerKeyboardRangeDrag(x) {
+    const key = this._keyAtX(x);
+    this.keyboardRangeDrag = {
+      startX: x,
+      startBase: normalizeComputerKeyboardBase(state.computerKeyboardBase),
+      startMidi: Number.isFinite(key?.midi) ? key.midi : null,
+    };
+    this.canvas.style.cursor = 'grabbing';
+  }
+
+  _updateComputerKeyboardRangeDrag(x) {
+    if (!this.keyboardRangeDrag) return;
+    const currentKey = this._keyAtX(x);
+    let delta = 0;
+    if (Number.isFinite(this.keyboardRangeDrag.startMidi) && Number.isFinite(currentKey?.midi)) {
+      delta = currentKey.midi - this.keyboardRangeDrag.startMidi;
+    } else {
+      delta = Math.round((x - this.keyboardRangeDrag.startX) / Math.max(8, this.W / 88));
+    }
+    const nextBase = normalizeComputerKeyboardBase(this.keyboardRangeDrag.startBase + delta);
+    if (nextBase === normalizeComputerKeyboardBase(state.computerKeyboardBase)) return;
+    if (this.onComputerKeyboardBaseChange) this.onComputerKeyboardBaseChange(nextBase);
+  }
+
+  _finishComputerKeyboardRangeDrag() {
+    if (!this.keyboardRangeDrag) return;
+    this.keyboardRangeDrag = null;
+    this.canvas.style.cursor = 'default';
+  }
+
   _bindEvents() {
     const c = this.canvas;
     const xy = e => this._localPointFromEvent(e);
@@ -3412,11 +3626,21 @@ class PianoRoll {
           if (!(e.metaKey || e.ctrlKey)) this._clearSelection();
           return;
         }
+        if (e.button === 0 && this._hitComputerKeyboardRangeHandle(x, y)) {
+          e.preventDefault();
+          this._startComputerKeyboardRangeDrag(x);
+          return;
+        }
         const k = this._hitTest(x, y);
         if (k) press(k.midi);
       },
       mm: e => {
         const { x, y } = xy(e);
+        if (this.keyboardRangeDrag) {
+          this._updateComputerKeyboardRangeDrag(x);
+          this.canvas.style.cursor = 'grabbing';
+          return;
+        }
         if (this.draggingNote) {
           this._updateNoteDrag(x, y);
           this._setCursor(y, this.draggingNote.mode);
@@ -3434,26 +3658,34 @@ class PianoRoll {
         this.hoverNoteIndex = noteHit ? noteHit.index : -1;
         this.hoverNoteMode = noteHit ? noteHit.mode : null;
         this._setCursor(y, noteHit ? noteHit.mode : null);
+        if (!noteHit && this._hitComputerKeyboardRangeHandle(x, y)) {
+          this.canvas.style.cursor = 'grab';
+        }
 
         if (e.buttons !== 1) return;
         const k = this._hitTest(x, y);
         if (k && !this.pressedKeys.has(k.midi)) { releaseAll(); press(k.midi); }
       },
-      mu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
+      mu: () => { this._finishComputerKeyboardRangeDrag(); this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
       ml: () => {
-        if (this.draggingNote || this.isLassoSelecting) return;
+        if (this.keyboardRangeDrag || this.draggingNote || this.isLassoSelecting) return;
         releaseAll();
         this.hoverNoteIndex = -1;
         this.hoverNoteMode = null;
         this.canvas.style.cursor = 'default';
       },
       wm: e => {
+        if (this.keyboardRangeDrag) {
+          const { x } = xy(e);
+          this._updateComputerKeyboardRangeDrag(x);
+          return;
+        }
         if (!this.draggingNote) return;
         const { x, y } = xy(e);
         this._updateNoteDrag(x, y);
       },
-      wu: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
-      wb: () => { this._finishNoteDrag(); this._finishLasso(); releaseAll(); this.canvas.style.cursor = 'default'; },
+      wu: () => { this._finishComputerKeyboardRangeDrag(); this._finishNoteDrag(); this._finishLasso(); releaseAll(); },
+      wb: () => { this._finishComputerKeyboardRangeDrag(); this._finishNoteDrag(); this._finishLasso(); releaseAll(); this.canvas.style.cursor = 'default'; },
       db: e => {
         if (!this.editMode) return;
         const { x, y } = xy(e);
@@ -3822,6 +4054,14 @@ class PianoRoll {
       ctx.strokeStyle=act?'rgba(139,92,246,0.3)':'rgba(0,0,0,0.15)';
       ctx.lineWidth=act?1.2:0.8;
       this._rr(ctx,k.x+0.8,y+2,k.w-1.6,KEY_H-3,2.5); ctx.stroke();
+      if (this.showComputerKeyHints && this.computerKeyHintsByMidi.has(k.midi)) {
+        ctx.strokeStyle = 'rgba(45,212,191,0.82)';
+        ctx.lineWidth = 1.4;
+        this._rr(ctx, k.x + 1.5, y + 5, k.w - 3, KEY_H - 9, 3);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(45,212,191,0.1)';
+        ctx.fillRect(k.x + 2, y + 5, Math.max(1, k.w - 4), 5);
+      }
 
       // Octave labels
       if(k.midi%12===0&&!act){
@@ -3831,7 +4071,8 @@ class PianoRoll {
         ctx.textAlign='center';ctx.fillText(`C${oct}`,k.x+k.w/2,y+KEY_H-7);
       }
       if (this.showComputerKeyHints) {
-        const keyHint = COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI[k.midi];
+        const labels = this.computerKeyHintsByMidi.get(k.midi);
+        const keyHint = Array.isArray(labels) ? labels[0] : '';
         if (keyHint) {
           ctx.fillStyle = act ? 'rgba(255,255,255,0.95)' : 'rgba(55,65,81,0.85)';
           ctx.font = `${act ? 700 : 600} 8px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
@@ -3892,8 +4133,15 @@ class PianoRoll {
       ctx.strokeStyle=act?'rgba(139,92,246,0.4)':'rgba(0,0,0,0.4)';
       ctx.lineWidth=act?1:0.6;
       this._rr(ctx,k.x+0.5,y+2,k.w-1,bkh-2,2); ctx.stroke();
+      if (this.showComputerKeyHints && this.computerKeyHintsByMidi.has(k.midi)) {
+        ctx.strokeStyle = 'rgba(45,212,191,0.92)';
+        ctx.lineWidth = 1.2;
+        this._rr(ctx, k.x + 1, y + 4, k.w - 2, bkh - 8, 2);
+        ctx.stroke();
+      }
       if (this.showComputerKeyHints) {
-        const keyHint = COMPUTER_PIANO_PRIMARY_KEY_BY_MIDI[k.midi];
+        const labels = this.computerKeyHintsByMidi.get(k.midi);
+        const keyHint = Array.isArray(labels) ? labels[0] : '';
         if (keyHint) {
           ctx.fillStyle = act ? 'rgba(255,255,255,0.95)' : 'rgba(203,213,225,0.88)';
           ctx.font = `${act ? 700 : 600} 7px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
@@ -3902,6 +4150,32 @@ class PianoRoll {
         }
       }
     });
+
+    const rangeRect = this._getComputerKeyboardRangeRect();
+    if (rangeRect) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(45,212,191,0.055)';
+      ctx.strokeStyle = this.keyboardRangeDrag ? 'rgba(153,246,228,0.98)' : 'rgba(45,212,191,0.9)';
+      ctx.lineWidth = this.keyboardRangeDrag ? 2.6 : 1.8;
+      this._rr(ctx, rangeRect.x, rangeRect.y, rangeRect.w, rangeRect.h, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = this.keyboardRangeDrag ? 'rgba(153,246,228,0.34)' : 'rgba(45,212,191,0.2)';
+      this._rr(ctx, rangeRect.x + 2, rangeRect.y + 2, Math.max(1, rangeRect.w - 4), rangeRect.handleH - 3, 4);
+      ctx.fill();
+
+      const gripX = rangeRect.x + rangeRect.w / 2;
+      ctx.strokeStyle = 'rgba(240,253,250,0.76)';
+      ctx.lineWidth = 1.1;
+      [-5, 0, 5].forEach(offset => {
+        ctx.beginPath();
+        ctx.moveTo(gripX + offset, rangeRect.y + 5);
+        ctx.lineTo(gripX + offset, rangeRect.y + rangeRect.handleH - 4);
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
 
   }
 
@@ -3954,6 +4228,10 @@ class PianoRoll {
     this.showComputerKeyHints = Boolean(enabled);
   }
 
+  setComputerKeyHints(hintsByMidi) {
+    this.computerKeyHintsByMidi = hintsByMidi instanceof Map ? hintsByMidi : new Map();
+  }
+
   applyFingerOverrideToSelection(finger) {
     const indices = this._getEditableIndicesForOperations(this._getActiveNoteIndex());
     if (!indices.length) return false;
@@ -3992,6 +4270,7 @@ class PianoRoll {
     window.removeEventListener('mouseup', this._h.wu);
     window.removeEventListener('blur', this._h.wb);
     window.removeEventListener('keydown', this._h.wk);
+    this._finishComputerKeyboardRangeDrag();
     this._finishNoteDrag(false);
     this._finishLasso();
     this.pressedKeys.clear();
@@ -4022,6 +4301,7 @@ class ScoreEditor {
     this.zoomY = Math.max(0.6, Math.min(2.4, Number(options.zoomY) || 1));
     this.readableMode = Boolean(options.readableMode);
     this.fingerSuggestionMode = Boolean(options.fingerSuggestionMode);
+    this.activeTrackId = normalizeMidiTrackId(options.activeTrackId || state.activeMidiTrackId);
     this.fingerSuggestionLevel = normalizeFingerSuggestionLevel(options.fingerSuggestionLevel);
     this.fingerSuggestionAlgorithm = normalizeFingerSuggestionAlgorithm(options.fingerSuggestionAlgorithm);
     this.fingerSuggestionMap = new Map();
@@ -4407,6 +4687,7 @@ class ScoreEditor {
         startTime: Math.max(0, (Number(source.startTime) || 0) + shiftSec),
         duration: Math.max(0.03, Number(source.duration) || 0.12),
         velocity: Math.max(1, Math.min(127, Math.round(Number(source.velocity) || 96))),
+        trackId: normalizeMidiTrackId(source.trackId),
       };
       this.notes.push(duplicate);
       newIndices.push(this.notes.length - 1);
@@ -4438,6 +4719,7 @@ class ScoreEditor {
       startTime: this._timeAtX(x, this.layout),
       duration: 0.35,
       velocity: 96,
+      trackId: this.activeTrackId,
     };
 
     this.notes.push(note);
@@ -5639,31 +5921,105 @@ function _syncHistoryOverlay(content) {
 }
 
 function _renderKeyboardNoteHintsPanel() {
-  const noteHints = [];
-  COMPUTER_PIANO_KEYS_BY_MIDI.forEach((labels, midi) => {
-    noteHints.push({
-      midi: Number(midi),
-      note: midiToNoteName(midi),
-      keys: labels.join(' / '),
-    });
-  });
-  noteHints.sort((a, b) => a.midi - b.midi);
-
+  const layout = getComputerKeyboardLayout();
+  const specs = getComputerKeyboardSpecs(layout.id, state.computerKeyboardBase);
+  const minNote = specs.length ? specs[0].note : '';
+  const maxNote = specs.length ? specs[specs.length - 1].note : '';
   return `
     <div class="w-keyboard-hints-panel">
       <div class="w-keyboard-hints-head">
         <span class="w-keyboard-hints-title">${_uiText('Computer Keyboard Mapping')}</span>
+        <span class="w-keyboard-hints-meta" style="color:#99f6e4;">${minNote}-${maxNote}</span>
       </div>
-      <div class="w-keyboard-hints-grid">
-        ${noteHints.map(item => `
+      <div class="w-keyboard-range-controls">
+        <div class="w-keyboard-layout-switch">
+          ${Object.values(COMPUTER_PIANO_KEYBOARD_LAYOUTS).map(item => `
+            <button type="button" class="w-keyboard-layout-btn ${item.id === layout.id ? 'active' : ''}" data-keyboard-layout="${item.id}">${item.label}</button>
+          `).join('')}
+        </div>
+      </div>
+      <div
+        class="w-keyboard-range-box"
+        style="--range-color:#2dd4bf;"
+        tabindex="0"
+        role="slider"
+        aria-label="${_uiText('Keyboard note range')}"
+        aria-valuemin="${COMPUTER_KEYBOARD_BASE_MIN}"
+        aria-valuemax="${COMPUTER_KEYBOARD_BASE_MAX}"
+        aria-valuenow="${normalizeComputerKeyboardBase(state.computerKeyboardBase)}"
+        title="${_uiText('Drag to move keyboard note range')}"
+      >
+        ${specs.map(item => `
           <div class="w-keyboard-hint-chip">
+            <span class="w-keyboard-hint-key">${item.label}</span>
             <span class="w-keyboard-hint-note">${item.note}</span>
-            <span class="w-keyboard-hint-keys">${item.keys}</span>
           </div>
         `).join('')}
       </div>
     </div>
   `;
+}
+
+function _bindKeyboardNoteHintsPanelActions(content) {
+  const panel = content?.querySelector('.w-keyboard-hints-panel');
+  if (!panel) return;
+  const updateKeyboardBase = (nextBase, options = {}) => {
+    const normalized = normalizeComputerKeyboardBase(nextBase);
+    if (normalized === normalizeComputerKeyboardBase(state.computerKeyboardBase)) return;
+    state.computerKeyboardBase = normalized;
+    if (_pianoRoll) _pianoRoll.setComputerKeyHints(getComputerKeyboardHintsByMidi());
+    _syncKeyboardPianoVisuals();
+    if (options.syncPanel !== false) _syncKeyboardNoteHintsPanel(content);
+  };
+  panel.querySelectorAll('[data-keyboard-layout]').forEach(button => {
+    button.addEventListener('click', () => {
+      const next = normalizeComputerKeyboardLayout(button.dataset.keyboardLayout);
+      if (next === state.computerKeyboardLayout) return;
+      state.computerKeyboardLayout = next;
+      _keyboardPianoPressedKeys.clear();
+      if (_pianoRoll) _pianoRoll.setComputerKeyHints(getComputerKeyboardHintsByMidi());
+      _syncKeyboardPianoVisuals();
+      _syncKeyboardNoteHintsPanel(content);
+    });
+  });
+  const rangeBox = panel.querySelector('.w-keyboard-range-box');
+  rangeBox?.addEventListener('keydown', event => {
+    let delta = 0;
+    if (event.key === 'ArrowLeft') delta = event.shiftKey ? -12 : -1;
+    else if (event.key === 'ArrowRight') delta = event.shiftKey ? 12 : 1;
+    else if (event.key === 'Home') delta = COMPUTER_KEYBOARD_BASE_MIN - normalizeComputerKeyboardBase(state.computerKeyboardBase);
+    else if (event.key === 'End') delta = COMPUTER_KEYBOARD_BASE_MAX - normalizeComputerKeyboardBase(state.computerKeyboardBase);
+    if (!delta) return;
+    event.preventDefault();
+    updateKeyboardBase((Number(state.computerKeyboardBase) || DEFAULT_COMPUTER_KEYBOARD_BASE) + delta);
+  });
+  rangeBox?.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.preventDefault();
+    const box = event.currentTarget;
+    const dragRect = box.getBoundingClientRect();
+    box.classList.add('dragging');
+    const updateFromPointer = pointerEvent => {
+      const ratio = dragRect.width > 0
+        ? ((Number(pointerEvent.clientX) || dragRect.left) - dragRect.left) / dragRect.width
+        : 0;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      const nextBase = COMPUTER_KEYBOARD_BASE_MIN + (clamped * (COMPUTER_KEYBOARD_BASE_MAX - COMPUTER_KEYBOARD_BASE_MIN));
+      updateKeyboardBase(nextBase, { syncPanel: false });
+    };
+    updateFromPointer(event);
+    const move = moveEvent => updateFromPointer(moveEvent);
+    const stop = () => {
+      box.classList.remove('dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      _syncKeyboardNoteHintsPanel(content);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  });
 }
 
 function _syncKeyboardNoteHintsPanel(content) {
@@ -5672,7 +6028,7 @@ function _syncKeyboardNoteHintsPanel(content) {
   const body = content.querySelector('#piano-body');
   if (!wrap || !body) return;
 
-  const shouldShow = state.stage === 'ready' && state.keyboardNoteHintsOpen;
+  const shouldShow = state.stage !== 'processing' && state.keyboardNoteHintsOpen;
   const existing = wrap.querySelector('.w-keyboard-hints-panel');
   if (!shouldShow) {
     if (existing) existing.remove();
@@ -5685,6 +6041,7 @@ function _syncKeyboardNoteHintsPanel(content) {
   } else {
     body.insertAdjacentHTML('beforebegin', panelHtml);
   }
+  _bindKeyboardNoteHintsPanelActions(content);
   applyUiLanguage();
 }
 
@@ -5913,7 +6270,7 @@ function renderDashboard(content) {
             <button
               id="keyboard-note-hints-toggle"
               class="w-note-guide-btn ${state.keyboardNoteHintsOpen ? 'active' : ''}"
-              ${state.stage!=='ready' ? 'disabled' : ''}
+              ${state.stage==='processing' ? 'disabled' : ''}
             >
               ${state.keyboardNoteHintsOpen ? _uiText('Hide Keyboard Notes') : _uiText('Keyboard Notes')}
             </button>
@@ -6011,11 +6368,21 @@ function renderDashboard(content) {
         state.fingerSuggestionReport = report && typeof report === 'object' ? report : null;
         _syncFingerConfidencePill(content, state.fingerSuggestionReport);
       },
+      onComputerKeyboardBaseChange: (nextBase) => {
+        const normalized = normalizeComputerKeyboardBase(nextBase);
+        if (normalized === normalizeComputerKeyboardBase(state.computerKeyboardBase)) return;
+        state.computerKeyboardBase = normalized;
+        if (_pianoRoll) _pianoRoll.setComputerKeyHints(getComputerKeyboardHintsByMidi());
+        _syncKeyboardPianoVisuals();
+        _syncKeyboardNoteHintsPanel(content);
+      },
       readableMode: state.scoreReadableMode,
+      activeTrackId: state.activeMidiTrackId,
       fingerSuggestionMode: state.fingerSuggestionMode && state.stage === 'ready',
       fingerSuggestionLevel: state.fingerSuggestionLevel,
       fingerSuggestionAlgorithm: state.fingerSuggestionAlgorithm,
-      showComputerKeyHints: state.keyboardNoteHintsOpen && state.stage === 'ready',
+      showComputerKeyHints: state.keyboardNoteHintsOpen && state.stage !== 'processing',
+      computerKeyHintsByMidi: getComputerKeyboardHintsByMidi(),
     };
 
     if (isScoreView) {
@@ -6242,10 +6609,11 @@ function renderDashboard(content) {
     renderDashboard(content);
   });
   content.querySelector('#keyboard-note-hints-toggle')?.addEventListener('click', () => {
-    if (state.stage !== 'ready') return;
+    if (state.stage === 'processing') return;
     state.keyboardNoteHintsOpen = !state.keyboardNoteHintsOpen;
     if (_pianoRoll && typeof _pianoRoll.setComputerKeyHintsVisibility === 'function') {
       _pianoRoll.setComputerKeyHintsVisibility(state.keyboardNoteHintsOpen);
+      _pianoRoll.setComputerKeyHints(getComputerKeyboardHintsByMidi());
     }
     _syncEditToolbar(content);
   });
@@ -6479,10 +6847,11 @@ function _isTextEditingElement(element) {
 
 function _syncKeyboardPianoVisuals() {
   if (!_pianoRoll || !_pianoRoll.pressedKeys || typeof _pianoRoll.pressedKeys.clear !== 'function') return;
+  const keyMap = getComputerKeyboardMap();
   _pianoRoll.pressedKeys.clear();
   _keyboardPianoPressedKeys.forEach(key => {
-    const midi = COMPUTER_PIANO_KEY_MAP[key];
-    if (Number.isFinite(midi)) _pianoRoll.pressedKeys.add(midi);
+    const spec = keyMap.get(String(key || '').toLowerCase());
+    if (Number.isFinite(spec?.midi)) _pianoRoll.pressedKeys.add(spec.midi);
   });
 }
 
@@ -6493,18 +6862,19 @@ function _releaseComputerKeyboardPiano() {
 
 function _handleComputerKeyboardPianoKeyDown(e) {
   if (state.page !== 'dashboard') return false;
-  if (state.noteEditMode || state.midiPlaying || state.stage === 'processing') return false;
+  if (state.midiPlaying || state.stage === 'processing') return false;
   if (e.metaKey || e.ctrlKey || e.altKey) return false;
 
-  const key = String(e.key || '').toLowerCase();
-  const midi = COMPUTER_PIANO_KEY_MAP[key];
-  if (!Number.isFinite(midi)) return false;
+  const rawKey = String(e.key || '').toLowerCase();
+  const keyMap = getComputerKeyboardMap();
+  const spec = keyMap.get(rawKey);
+  if (!spec || !Number.isFinite(spec.midi)) return false;
 
   e.preventDefault();
-  if (e.repeat || _keyboardPianoPressedKeys.has(key)) return true;
-  _keyboardPianoPressedKeys.add(key);
+  if (e.repeat || _keyboardPianoPressedKeys.has(rawKey)) return true;
+  _keyboardPianoPressedKeys.add(rawKey);
   _syncKeyboardPianoVisuals();
-  playPreviewNote(midi, 0.65, 0.92).catch(error => {
+  playPreviewNote(spec.midi, 0.65, 0.92).catch(error => {
     console.error('Computer keyboard preview error:', error);
   });
   return true;
@@ -6513,7 +6883,7 @@ function _handleComputerKeyboardPianoKeyDown(e) {
 function _handleComputerKeyboardPianoKeyUp(e) {
   if (state.page !== 'dashboard') return false;
   const key = String(e.key || '').toLowerCase();
-  if (!Object.prototype.hasOwnProperty.call(COMPUTER_PIANO_KEY_MAP, key)) return false;
+  if (!getComputerKeyboardMap().has(key)) return false;
   if (_keyboardPianoPressedKeys.delete(key)) {
     _syncKeyboardPianoVisuals();
   }
@@ -6688,14 +7058,22 @@ async function _extractMidiData(midiBlob) {
   const arrayBuffer = await midiBlob.arrayBuffer();
   const parsed = new window.Midi(arrayBuffer);
   const notes = [];
+  const tracks = [];
 
-  parsed.tracks.forEach(track => {
+  parsed.tracks.forEach((track, trackIndex) => {
+    const trackId = makeMidiTrackId(trackIndex + 1);
+    tracks.push({
+      id: trackId,
+      name: String(track?.name || `Piano ${trackIndex + 1}`),
+      color: MIDI_TRACK_COLORS[trackIndex % MIDI_TRACK_COLORS.length],
+    });
     track.notes.forEach(note => {
       notes.push({
         note: note.midi,
         startTime: note.time,
         duration: note.duration,
         velocity: Math.round((note.velocity ?? 0.8) * 127),
+        trackId,
       });
     });
   });
@@ -6714,6 +7092,7 @@ async function _extractMidiData(midiBlob) {
   return {
     parsed,
     notes,
+    tracks: normalizeMidiTracks(tracks, notes),
     duration: resolvedDuration,
     tempo,
   };
@@ -6734,6 +7113,8 @@ async function _applyMidiBlob(midiBlob, successMessage, options = {}) {
   state.rawMidiNotes = _cloneNotes(midiData.notes);
   state.rawMidiDuration = midiData.duration;
   state.midiNotes = _cloneNotes(effectiveNotes);
+  state.midiTracks = normalizeMidiTracks(midiData.tracks, state.midiNotes);
+  state.activeMidiTrackId = state.midiTracks[0]?.id || DEFAULT_MIDI_TRACK_ID;
   state.midiDuration = Math.max(midiData.duration, effectiveDuration);
   state.midiTempo = midiData.tempo;
 
@@ -6770,20 +7151,32 @@ function _rebuildMidiBlobFromEditedNotes(syncRaw = true) {
       midi.header.setTempo(Math.max(30, Math.min(300, Number(state.midiTempo) || 120)));
     }
 
-    const track = midi.addTrack();
-    const orderedNotes = [...state.midiNotes].sort((a, b) => a.startTime - b.startTime);
-    orderedNotes.forEach(note => {
-      const midiNote = Math.round(Number(note.note));
-      const startTime = Math.max(0, Number(note.startTime) || 0);
-      const duration = Math.max(0.03, Number(note.duration) || 0.12);
-      const velocity = Math.min(1, Math.max(0.05, (Number(note.velocity) || 96) / 127));
+    const tracks = ensureMidiTracks();
+    const notesByTrack = new Map();
+    tracks.forEach(track => notesByTrack.set(track.id, []));
+    [...state.midiNotes].forEach(note => {
+      const trackId = normalizeMidiTrackId(note.trackId);
+      if (!notesByTrack.has(trackId)) notesByTrack.set(trackId, []);
+      notesByTrack.get(trackId).push(note);
+    });
 
-      if (!Number.isFinite(midiNote) || midiNote < MIDI_LO || midiNote > MIDI_HI) return;
-      track.addNote({
-        midi: midiNote,
-        time: startTime,
-        duration,
-        velocity,
+    tracks.forEach(trackInfo => {
+      const track = midi.addTrack();
+      track.name = trackInfo.name;
+      const orderedNotes = (notesByTrack.get(trackInfo.id) || []).sort((a, b) => a.startTime - b.startTime);
+      orderedNotes.forEach(note => {
+        const midiNote = Math.round(Number(note.note));
+        const startTime = Math.max(0, Number(note.startTime) || 0);
+        const duration = Math.max(0.03, Number(note.duration) || 0.12);
+        const velocity = Math.min(1, Math.max(0.05, (Number(note.velocity) || 96) / 127));
+
+        if (!Number.isFinite(midiNote) || midiNote < MIDI_LO || midiNote > MIDI_HI) return;
+        track.addNote({
+          midi: midiNote,
+          time: startTime,
+          duration,
+          velocity,
+        });
       });
     });
 
@@ -8217,6 +8610,8 @@ const UI_STATIC_TRANSLATIONS = {
     'Keyboard Notes': 'Notas ↔ teclado',
     'Hide Keyboard Notes': 'Ocultar notas ↔ teclado',
     'Computer Keyboard Mapping': 'Equivalencia teclado del ordenador',
+    'Keyboard note range': 'Rango de notas del teclado',
+    'Drag to move keyboard note range': 'Arrastra para mover el rango de notas del teclado',
     'MIDI Source:': 'Fuente MIDI:',
     'PIANO ROLL': 'PIANO ROLL',
     'MUSIC SCORE': 'PARTITURA',
@@ -8474,6 +8869,8 @@ const UI_STATIC_TRANSLATIONS = {
     'Keyboard Notes': 'Notes ↔ teclat',
     'Hide Keyboard Notes': 'Amagar notes ↔ teclat',
     'Computer Keyboard Mapping': 'Equivalència teclat de l\'ordinador',
+    'Keyboard note range': 'Interval de notes del teclat',
+    'Drag to move keyboard note range': 'Arrossega per moure l\'interval de notes del teclat',
     'MIDI Source:': 'Font MIDI:',
     'PIANO ROLL': 'PIANO ROLL',
     'MUSIC SCORE': 'PARTITURA',
