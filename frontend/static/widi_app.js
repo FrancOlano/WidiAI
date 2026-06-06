@@ -4250,13 +4250,18 @@ class ScoreEditor {
     const right = 22;
     const usableW = Math.max(120, viewportW - left - right);
     const totalDuration = this._getTotalDuration();
-    const basePxPerSec = usableW / totalDuration;
+    const targetVisibleSeconds = 18;
+    const visibleDuration = Math.min(totalDuration, targetVisibleSeconds);
+    const viewportPxPerSec = usableW / Math.max(0.5, visibleDuration);
     const closestSeparationSec = this._getClosestNoteSeparationSec();
     const targetGapPx = Math.max(12, Math.min(20, viewportW * 0.018));
     const adaptivePxPerSec = targetGapPx / closestSeparationSec;
-    const maxAdaptivePxPerSec = basePxPerSec * 1.65;
-    const baseSpacingPxPerSec = Math.min(maxAdaptivePxPerSec, Math.max(basePxPerSec, adaptivePxPerSec));
-    const pxPerSec = baseSpacingPxPerSec * this.zoomX;
+    const baseSpacingPxPerSec = Math.min(viewportPxPerSec * 2.2, Math.max(viewportPxPerSec, adaptivePxPerSec));
+    const maxContentW = Math.max(viewportW, Math.min(16000, viewportW * 28));
+    const maxPxPerSec = Math.max(usableW / totalDuration, (maxContentW - left - right) / totalDuration);
+    const pxPerSec = Math.min(baseSpacingPxPerSec * this.zoomX, maxPxPerSec);
+    const scoreEndX = left + (totalDuration * pxPerSec);
+    const contentW = Math.max(viewportW, Math.ceil(scoreEndX + right));
 
     const baseLineGap = Math.max(10, Math.min(16, Math.round((H - 70) / 12)));
     const lineGap = Math.max(8, Math.min(24, baseLineGap * this.zoomY));
@@ -4272,6 +4277,8 @@ class ScoreEditor {
       totalDuration,
       closestSeparationSec,
       pxPerSec,
+      scoreEndX,
+      contentW,
       lineGap,
       staffTop,
       yE4,
@@ -4294,8 +4301,10 @@ class ScoreEditor {
   }
 
   _timeAtX(x, layout) {
-    const clamped = Math.max(layout.left, Math.min(this.W - layout.right, x));
-    return Math.max(0, (clamped - layout.left) / layout.pxPerSec);
+    const maxX = Math.max(layout.left, Math.min(this.W - layout.right, layout.scoreEndX));
+    const clamped = Math.max(layout.left, Math.min(maxX, x));
+    const resolvedTime = Math.max(0, (clamped - layout.left) / layout.pxPerSec);
+    return Math.min(layout.totalDuration, resolvedTime);
   }
 
   _midiAtY(y, layout) {
@@ -5084,16 +5093,43 @@ class ScoreEditor {
     window.addEventListener('keydown', this._h.wk);
   }
 
+  _scrollTimeIntoView(force = false) {
+    if (!this.scrollHost || !this.layout) return;
+    const viewportW = this.scrollHost.clientWidth || this.viewportW || this.W || 0;
+    const maxScroll = Math.max(0, this.scrollHost.scrollWidth - viewportW);
+    if (maxScroll <= 0 || viewportW <= 0) return;
+
+    const playheadX = this._timeToX(this.currentTime, this.layout);
+    const scrollLeft = this.scrollHost.scrollLeft;
+    const leadingMargin = Math.max(100, Math.min(260, viewportW * 0.34));
+    const trailingMargin = Math.max(90, Math.min(230, viewportW * 0.28));
+    let nextScrollLeft = scrollLeft;
+
+    if (force) {
+      nextScrollLeft = playheadX - (viewportW * 0.32);
+    } else if (playheadX > scrollLeft + viewportW - trailingMargin) {
+      nextScrollLeft = playheadX - viewportW + trailingMargin;
+    } else if (playheadX < scrollLeft + leadingMargin) {
+      nextScrollLeft = playheadX - leadingMargin;
+    }
+
+    nextScrollLeft = Math.max(0, Math.min(maxScroll, Math.round(nextScrollLeft)));
+    if (Math.abs(nextScrollLeft - scrollLeft) > 1) {
+      this.scrollHost.scrollLeft = nextScrollLeft;
+      this.scrollRatio = maxScroll > 0 ? (nextScrollLeft / maxScroll) : 0;
+    }
+  }
+
   _setup() {
     cancelAnimationFrame(this.animId);
     const dpr = window.devicePixelRatio || 1;
     const viewportW = this.container.clientWidth || 800;
     const H = this.container.clientHeight || 330;
-    const widthZoom = Math.max(1, this.zoomX);
-    const W = Math.max(viewportW, Math.round(viewportW * widthZoom));
     this.viewportW = viewportW;
-    this.W = W;
     this.H = H;
+    const widthLayout = this._buildLayout(viewportW, H);
+    const W = Math.max(viewportW, Math.ceil(widthLayout.contentW || viewportW));
+    this.W = W;
 
     this.scrollHost.classList.toggle('scroll-x', W > viewportW + 2);
     this.canvas.width = W * dpr;
@@ -5109,6 +5145,9 @@ class ScoreEditor {
       this.scrollRatio = 0;
     }
 
+    this.layout = this._buildLayout(W, H);
+    if (this.isPlaying) this._scrollTimeIntoView(true);
+
     const ctx = this.canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const loop = () => {
@@ -5122,12 +5161,14 @@ class ScoreEditor {
     const next = Math.max(0, Number(t) || 0);
     if (Math.abs(next - this.currentTime) < 0.0001) return;
     this.currentTime = next;
+    if (this.isPlaying) this._scrollTimeIntoView(false);
   }
 
   setPlaying(playing) {
     const next = Boolean(playing);
     if (next === this.isPlaying) return;
     this.isPlaying = next;
+    if (this.isPlaying) this._scrollTimeIntoView(true);
   }
 
   setZoom(x, y) {
@@ -5785,7 +5826,7 @@ function renderDashboard(content) {
         </div>
 
         <!-- MIDI Player -->
-        <div class="w-panel">
+        <div class="w-panel" id="midi-player-panel">
           <div class="w-panel-header">${ICON.music2(13,'#6b7280')} MIDI PLAYER</div>
           <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;">
             <button class="w-ctrl-btn" id="midi-stop" ${state.stage!=='ready'?'disabled':''}>${ICON.stop(14,'#9ca3af')}</button>
@@ -5816,6 +5857,7 @@ function renderDashboard(content) {
               </select>
             </div>
           </div>
+          <p style="font-size:10px;color:#4b5563;margin:-4px 0 10px;">${_uiText('Drag and drop a MIDI file here (.mid, .midi)')}</p>
           ${state.midiSourceName ? `
             <p style="font-size:10px;color:#6b7280;margin:0 0 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
               MIDI Source: ${state.midiSourceName}
@@ -6109,6 +6151,51 @@ function renderDashboard(content) {
     content.querySelector('#midi-file-input')?.click();
   });
   content.querySelector('#midi-file-input')?.addEventListener('change', _handleMidiUpload);
+  const midiDropPanel = content.querySelector('#midi-player-panel');
+  if (midiDropPanel) {
+    let midiDragDepth = 0;
+    const enter = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!canLoadMidiNow) return;
+      midiDragDepth += 1;
+      midiDropPanel.classList.add('drag-active');
+    };
+    const over = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!canLoadMidiNow) return;
+      if (!midiDropPanel.classList.contains('drag-active')) {
+        midiDropPanel.classList.add('drag-active');
+      }
+    };
+    const leave = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      midiDragDepth = Math.max(0, midiDragDepth - 1);
+      if (midiDragDepth === 0) {
+        midiDropPanel.classList.remove('drag-active');
+      }
+    };
+    const drop = async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      midiDragDepth = 0;
+      midiDropPanel.classList.remove('drag-active');
+      const droppedFile = e.dataTransfer?.files?.[0];
+      if (!droppedFile) return;
+      if (!canLoadMidiNow) {
+        setStatusMessage(_uiText('Stop recording or wait for processing before loading a MIDI file.'), 'error');
+        renderDashboard(content);
+        return;
+      }
+      await _loadMidiFileFromUserInput(droppedFile, content);
+    };
+    midiDropPanel.addEventListener('dragenter', enter);
+    midiDropPanel.addEventListener('dragover', over);
+    midiDropPanel.addEventListener('dragleave', leave);
+    midiDropPanel.addEventListener('drop', drop);
+  }
   content.querySelector('#sf2-instrument-select')?.addEventListener('change', async e => {
     const nextInstrument = normalizeSf2Instrument(e.target?.value);
     if (nextInstrument === state.sf2Instrument) return;
@@ -8102,6 +8189,7 @@ const UI_STATIC_TRANSLATIONS = {
     'Upload audio file': 'Subir archivo de audio',
     'Upload MIDI file': 'Subir archivo MIDI',
     'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrastra y suelta audio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    'Drag and drop a MIDI file here (.mid, .midi)': 'Arrastra y suelta un archivo MIDI aquí (.mid, .midi)',
     'Drag and drop audio or MIDI here (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)': 'Arrastra y suelta audio o MIDI aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)',
     Clear: 'Limpiar',
     'AI MODEL': 'MODELO IA',
@@ -8237,6 +8325,7 @@ const UI_STATIC_TRANSLATIONS = {
     'Recording source switched to Ambient Mic.': 'Fuente de grabación cambiada a Micrófono ambiente.',
     'Internal recording error': 'Error de grabación interna',
     'Microphone error': 'Error de micrófono',
+    'Stop recording or wait for processing before loading a MIDI file.': 'Detén la grabación o espera al procesamiento antes de cargar un archivo MIDI.',
     'Wait for the current conversion to finish before loading a MIDI file.': 'Espera a que termine la conversión actual antes de cargar un archivo MIDI.',
     'MIDI file is too large. Please choose a smaller .mid/.midi file.': 'El archivo MIDI es demasiado grande. Elige un archivo .mid/.midi más pequeño.',
     'Invalid file type. Please upload a .mid or .midi file.': 'Tipo de archivo no válido. Sube un archivo .mid o .midi.',
@@ -8357,6 +8446,7 @@ const UI_STATIC_TRANSLATIONS = {
     'Upload audio file': 'Pujar fitxer d\'àudio',
     'Upload MIDI file': 'Pujar fitxer MIDI',
     'Drag and drop audio here (.wav, .mp3, .flac, .ogg, .m4a, .webm)': 'Arrossega i deixa anar l\'àudio aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm)',
+    'Drag and drop a MIDI file here (.mid, .midi)': 'Arrossega i deixa anar un fitxer MIDI aquí (.mid, .midi)',
     'Drag and drop audio or MIDI here (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)': 'Arrossega i deixa anar àudio o MIDI aquí (.wav, .mp3, .flac, .ogg, .m4a, .webm, .mid, .midi)',
     Clear: 'Netejar',
     'AI MODEL': 'MODEL IA',
@@ -8491,6 +8581,7 @@ const UI_STATIC_TRANSLATIONS = {
     'Recording source switched to Ambient Mic.': 'Font de gravació canviada a Micròfon ambient.',
     'Internal recording error': 'Error de gravació interna',
     'Microphone error': 'Error de micròfon',
+    'Stop recording or wait for processing before loading a MIDI file.': 'Atura la gravació o espera el processament abans de carregar un fitxer MIDI.',
     'Wait for the current conversion to finish before loading a MIDI file.': 'Espera que acabi la conversió actual abans de carregar un fitxer MIDI.',
     'MIDI file is too large. Please choose a smaller .mid/.midi file.': 'El fitxer MIDI és massa gran. Tria un fitxer .mid/.midi més petit.',
     'Invalid file type. Please upload a .mid or .midi file.': 'Tipus de fitxer no vàlid. Puja un fitxer .mid o .midi.',
